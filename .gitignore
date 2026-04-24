@@ -1,0 +1,34 @@
+# Python / UV
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Large weights / datasets (reproducible from downloads, see README)
+out/*.pth
+minimind/out/*.pth
+minimind/dataset/*.jsonl
+minimind/dataset/*.bin
+minimind/dataset/*.tar
+minimind/dataset/*.tar.gz
+minimind/.git/
+
+# Upstream minimind checkpoints & images (we depend on it as a reference; not our work)
+minimind/images/
+
+# HF / datasets cache that may land in repo root
+.cache/
+hf_home/
+
+# Logs / temp
+*.log
+/tmp/
+logs/
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
