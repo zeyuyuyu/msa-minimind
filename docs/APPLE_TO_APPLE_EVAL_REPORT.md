@@ -2,7 +2,64 @@
 
 > **目的**：在 base 链 SFT-S2 训完产生 LLM-judge 1.503/5 的失败结果后，user 反复强调"训练前后 / 我们模型 vs paper 必须做 apple-to-apple 公平对比"。本报告设计并执行了 3 组对照实验，定位 base 链 1.503 分的真正瓶颈。
 >
-> **核心结论（提前剧透）**：base 链的 LM SFT 部分其实已经达到（甚至超过）paper MSA-4B-S2 水平，**真正瓶颈是 router 训练严重不充分**。下一轮重训应做 **router-only finetune**，而非完整重训 LM。
+> **核心结论（提前剧透 / v3.5 更新）**：
+> 1. router 训练严重不充分（precision ~0.03 ≈ 随机），是首要瓶颈；
+> 2. 但 hybrid-oracle 5/9 bench 数据显示 LM 自身平均也只有 2.25/5（5-bench），跟 vanilla 9B + 不喂任何 docs (2.12) 相当 → **LM 也被训弱了**；
+> 3. 因此 router-only finetune 只是 **第一步 sanity check**（48h），**长期必须完整重训 instruct chain**。
+
+---
+
+## 0. 术语 & FAQ
+
+> 几个 reviewer 反复问到的概念，统一在这里解释一次。
+
+### 0.1 什么是 "oracle"？
+
+**oracle = 给模型直接喂"标准答案对应的金标准文档"，不经过任何检索器（router / BM25 / dense）**。
+
+每个 bench 数据集里，每条 question 都标注了一份"理论上能回答这个 question 的文档列表"（如 musique 标注 4 个 supporting paragraphs，hotpotqa 标注 2 个）。把这些"标注好的 gold docs"直接当作"检索结果"喂给模型，就叫 oracle。
+
+**为什么要测 oracle**：
+- **隔离 router 错误**：oracle 把"检索质量"这个变量钉死成 100% 完美，剩下分数高低就完全反映 LM 自己的回答能力。
+- **建立 LM 上限**：oracle 分数是这个 LM 在"检索完美"假设下的天花板。如果 oracle 分数还很低 → 问题在 LM；如果 oracle 分数很高但实际 router 选 docs 后分数低 → 问题在 router。
+- **paper 的 Table 2 也用 oracle 列做对比**，所以这是这个领域的标准 diagnostic。
+
+**本报告里 oracle 出现 2 个变体**：
+| 变体 | 出现位置 | 文档怎么进模型 | 模型用什么 prompt |
+| --- | --- | --- | --- |
+| **vanilla + oracle** | §3.1 | 直接拼到 prompt 里，作为 RAG context | 自由生成（普通 9B-Instruct chat 格式） |
+| **hybrid-oracle** | §3.4 | 通过 `EncodedCorpus.gather_topk_docs()` 注入到 MSA 的 `pooled_cache`，**完全绕过 router** | MSA 三段式（part_a doc-id / part_b doc 原文 / part_c answer） |
+
+两者都是"完美检索"，区别只在于"用 vanilla 模型 + RAG prompt 测 LM 上限" vs "用我们训完的 MSA 模型 + 三段式 prompt 测 LM 上限"。
+
+### 0.2 什么是 "apple-to-apple"？
+
+字面意思：在控制其它所有变量不变的前提下，**只改一个变量**做对比。本报告里的 4 组实验之间的关系：
+
+```
+vanilla + no-context    （LM 纯参数化知识基线）
+        ↓ +RAG（BM25 top-5）
+vanilla + BM25          （+ 真实检索器的提升）
+        ↓ +oracle（gold docs 替换 BM25）
+vanilla + oracle        （检索器从 BM25 升级到完美）
+        ↓ +MSA 训练（LM 换成训完的 base SFT-S2，prompt 换成三段式）
+hybrid-oracle           （我们的训练对 LM 上限的影响）
+```
+
+通过这 4 阶梯，能精确算出 router、训练范式、训练本身分别贡献了多少分。
+
+### 0.3 什么是 "router precision/recall"？
+
+router 是 MSA 模型里负责"从 corpus 里选 top-k docs"的子模块。
+
+- **precision = router 选出的 k 个 docs 里，有多少个真的是 gold doc** （越高越好）
+- **recall    = 所有 gold docs 里，有多少个被 router 选中**       （越高越好）
+
+base SFT-S2 在 musique 上 router precision = **0.028** ≈ 随机猜（因为 musique gold ratio 4/100 = 0.04），所以 router 几乎完全没学到。
+
+### 0.4 这份报告里的 LLM-judge 0-5 分是怎么打的？
+
+调 `google/gemini-2.5-flash` 走 OpenRouter，使用 EverMind 论文官方的 judge prompt（在 `scripts/llm_judge_evermind.py`），同一个 prompt 同一个 model 跑所有实验，确保 absolute 数字之间可比。本报告所有数字都是同一套 judge 跑出来的。
 
 ---
 
@@ -106,18 +163,20 @@ base SFT-S2 的 LM、prompt、parse 全部不变；唯一改动：把 router 选
 | Bench | empty_rate | reach_part_c | LLM-judge 0-5 | vs vanilla+oracle gap |
 | --- | --- | --- | --- | --- |
 | musique（10q smoke） | 0.10 | 0.90 | 2.70 ⚠️ 小样本偏高 | — |
-| **musique（50q full）** | **0.06** | **0.94** | **1.58** | -2.00 |
-| **hotpotqa（50q full）** | **0.04** | **0.98** | **3.48** | -1.06 |
-| **nature_questions（50q full）** | *待* | *待* | **1.28** | **-2.64** ⚠️ |
-| msmarco_v1 | *进行中* | | | |
-| 其他 5 bench | *待* | | | |
-| **3-bench AVERAGE so far** | — | — | **2.11** | — |
+| **musique（50q full）** | **0.06** | **0.94** | **1.54** | -2.04 |
+| **hotpotqa（50q full）** | **0.04** | **0.98** | **3.46** | -1.08 |
+| **nature_questions（50q full）** | — | — | **1.22** | **-2.70** ⚠️ |
+| **msmarco_v1（50q full）** | — | — | **2.84** | -0.98 |
+| **2wikimultihopqa（50q full）** | — | — | **2.20** | -1.82 |
+| hipporag_popqa | *进行中* | | | |
+| 其他 3 bench | *待* | | | |
+| **5-bench AVERAGE so far** | — | — | **2.25** | — |
 
-> **⚠️ 重要 walkback #1**：musique full 50q(1.58)显著低于 smoke 10q(2.70)。Smoke 抽样偏向简单 query（3-4 doc）。**真实数据下，LM 在 oracle 完美检索下也只能拿 1.58**，比 paper MSA-4B-S2 的 2.21 还低 0.63。
+> **⚠️ 重要 walkback #1**：musique full 50q(1.54)显著低于 smoke 10q(2.70)。Smoke 抽样偏向简单 query（3-4 doc）。**真实数据下，LM 在 oracle 完美检索下也只能拿 1.54**，比 paper MSA-4B-S2 的 2.21 还低 0.67。
 
-> **⚠️ 重要 walkback #2**：nature_questions oracle = **1.28**，比 vanilla 9B + 不带任何 docs (2.05) 还低。这暴露了一个新问题：**MSA 三段式 prompt 在 short-answer 任务上有副作用**。NQ 是 1-2 词的短答 QA，但我们的模型被训练成输出 1300+ char 的 part_b doc 复述 + part_c answer，short-answer 抽取被 part_b 输出干扰了。这是 SFT 数据 mix 问题（sft_mix 偏向 multi-hop 长答 QA，没专门处理 NQ-style short answer）。
+> **⚠️ 重要 walkback #2**：nature_questions oracle = **1.22**，比 vanilla 9B + 不带任何 docs (2.05) 还低。这暴露了一个新问题：**MSA 三段式 prompt 在 short-answer 任务上有副作用**。NQ 是 1-2 词的短答 QA，但我们的模型被训练成输出 1300+ char 的 part_b doc 复述 + part_c answer，short-answer 抽取被 part_b 输出干扰了。这是 SFT 数据 mix 问题（sft_mix 偏向 multi-hop 长答 QA，没专门处理 NQ-style short answer）。
 
-> **当前 3-bench avg = 2.11 ≈ vanilla 9B + no-context (2.12)**：base 链的 LM 在 oracle 完美检索下，平均水平等于训练前的 9B-Instruct 不带任何 docs。**训练让模型在 absolute terms 退化**。
+> **当前 5-bench avg = 2.25 ≈ vanilla 9B + no-context (2.12)**：base 链的 LM 在 oracle 完美检索下，平均水平基本等于训练前的 9B-Instruct 不带任何 docs。**训练在大多数任务上让模型相对训练前出现退化**。仅 hotpotqa（multi-hop, 长答）训练有正向收益（3.46 vs vanilla no-ctx 1.50）；其它任务 oracle 上限都≤vanilla no-ctx。
 
 ---
 
