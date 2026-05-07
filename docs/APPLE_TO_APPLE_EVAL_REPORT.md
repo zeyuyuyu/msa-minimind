@@ -103,15 +103,21 @@ prompt 里只问 question，不喂任何 docs。这是 LM 纯参数化知识下�
 
 base SFT-S2 的 LM、prompt、parse 全部不变；唯一改动：把 router 选 docs 的步骤替换为"直接给 gold docs"。这是我们 base 链的 **LM 上限**（受训完后 SFT-S2 能力限制）。
 
-| Bench | empty_rate | reach_part_c | LLM-judge 0-5 |
-| --- | --- | --- | --- |
-| musique（10q smoke） | 0.10 | 0.90 | 2.70 ⚠️ 小样本偏高 |
-| **musique（50q full）** | **0.06** | **0.94** | **1.56** |
-| hotpotqa | *进行中* | | |
-| 其他 7 bench | *进行中* | | |
-| **AVERAGE** | — | — | *待* |
+| Bench | empty_rate | reach_part_c | LLM-judge 0-5 | vs vanilla+oracle gap |
+| --- | --- | --- | --- | --- |
+| musique（10q smoke） | 0.10 | 0.90 | 2.70 ⚠️ 小样本偏高 | — |
+| **musique（50q full）** | **0.06** | **0.94** | **1.58** | -2.00 |
+| **hotpotqa（50q full）** | **0.04** | **0.98** | **3.48** | -1.06 |
+| **nature_questions（50q full）** | *待* | *待* | **1.28** | **-2.64** ⚠️ |
+| msmarco_v1 | *进行中* | | | |
+| 其他 5 bench | *待* | | | |
+| **3-bench AVERAGE so far** | — | — | **2.11** | — |
 
-> **⚠️ 重要 walkback**：musique full 50q(1.56)显著低于 smoke 10q(2.70)。Smoke 抽样偏向简单 query（3-4 doc）。**真实数据下，LM 在 oracle 完美检索下也只能拿 1.56**，比 paper MSA-4B-S2 的 2.21 还低 0.65。这意味着 root cause 不只是 router，**LM 自己也比 paper 弱**——可能由 LoRA r=16 太小、Base backbone 缺 chat 先验、CPT 1/4400 paper 数据量等因素累加。
+> **⚠️ 重要 walkback #1**：musique full 50q(1.58)显著低于 smoke 10q(2.70)。Smoke 抽样偏向简单 query（3-4 doc）。**真实数据下，LM 在 oracle 完美检索下也只能拿 1.58**，比 paper MSA-4B-S2 的 2.21 还低 0.63。
+
+> **⚠️ 重要 walkback #2**：nature_questions oracle = **1.28**，比 vanilla 9B + 不带任何 docs (2.05) 还低。这暴露了一个新问题：**MSA 三段式 prompt 在 short-answer 任务上有副作用**。NQ 是 1-2 词的短答 QA，但我们的模型被训练成输出 1300+ char 的 part_b doc 复述 + part_c answer，short-answer 抽取被 part_b 输出干扰了。这是 SFT 数据 mix 问题（sft_mix 偏向 multi-hop 长答 QA，没专门处理 NQ-style short answer）。
+
+> **当前 3-bench avg = 2.11 ≈ vanilla 9B + no-context (2.12)**：base 链的 LM 在 oracle 完美检索下，平均水平等于训练前的 9B-Instruct 不带任何 docs。**训练让模型在 absolute terms 退化**。
 
 ---
 
@@ -176,16 +182,17 @@ paper MSA-4B-S2          →  trained MSA      →  judge 2.21
 
 | Bench | paper 4B + RAG R@1 | paper 4B + RAG R@10 | paper MSA-4B-S2 | 我们 vanilla 9B + no-ctx | 我们 vanilla 9B + BM25 | 我们 vanilla 9B + oracle | 我们 base SFT-S2 真 router | 我们 base SFT-S2 + oracle |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| musique | 0.94 | 1.93 | **2.21** | 1.02 | 1.36 | **3.58** | 0.66 ❌ | **1.56**（50q full） |
-| hotpotqa | 2.25 | 3.79 | 4.06 | 2.13 | 3.35 | **4.54** | *待* | *进行中* |
-| nature_questions | 3.45 | 3.30 | 3.55 | 2.05 | 3.51 | **3.92** | *待* | *进行中* |
+| musique | 0.94 | 1.93 | **2.21** | 1.02 | 1.36 | **3.58** | 0.66 ❌ | **1.58** |
+| hotpotqa | 2.25 | 3.79 | 4.06 | 2.13 | 3.35 | **4.54** | *待* | **3.48** |
+| nature_questions | 3.45 | 3.30 | 3.55 | 2.05 | 3.51 | **3.92** | *待* | **1.28** ⚠️ |
 | msmarco_v1 | 2.89 | 3.01 | 4.14 | 2.70 | 3.04 | **3.82** | *待* | *进行中* |
-| 2wikimultihopqa | 1.07 | 3.16 | 4.28 | 2.50 | 2.37 | **4.02** | *待* | *进行中* |
-| hipporag_popqa | 2.96 | 3.30 | 3.43 | 1.90 | 2.42 | **3.63** | *待* | *进行中* |
-| hipporag_narrative | 1.61 | 3.54 | 3.40 | 1.02 | 1.82 | **3.25** | *待* | *进行中* |
-| dureader | 3.73 | 3.61 | 4.16 | 1.99 | 0.73 | **3.91** | *待* | *进行中* |
-| triviaqa_10M / 06M | 4.13 | 4.39 | 4.62 | 3.74 | 4.28 | **4.43** | *待* | *进行中* |
-| **AVERAGE** | **2.56** | **3.24** | **3.76** | **2.12** | **2.54** | **3.90** | **1.50** | *待* |
+| 2wikimultihopqa | 1.07 | 3.16 | 4.28 | 2.50 | 2.37 | **4.02** | *待* | *待* |
+| hipporag_popqa | 2.96 | 3.30 | 3.43 | 1.90 | 2.42 | **3.63** | *待* | *待* |
+| hipporag_narrative | 1.61 | 3.54 | 3.40 | 1.02 | 1.82 | **3.25** | *待* | *待* |
+| dureader | 3.73 | 3.61 | 4.16 | 1.99 | 0.73 | **3.91** | *待* | *待* |
+| triviaqa_10M / 06M | 4.13 | 4.39 | 4.62 | 3.74 | 4.28 | **4.43** | *待* | *待* |
+| **3-bench partial avg** | 2.21 | 3.01 | 3.27 | 1.73 | 2.74 | 4.01 | — | **2.11** |
+| **9-bench AVERAGE** | **2.56** | **3.24** | **3.76** | **2.12** | **2.54** | **3.90** | **1.50** | *待* |
 
 ### 几个关键比较
 
@@ -228,14 +235,14 @@ paper MSA-4B-S2          →  trained MSA      →  judge 2.21
 
 ## 8. Eval 状态（实时）
 
-| Eval | 机器 | 进度 | LLM-judge avg |
+| Eval | 机器 | 进度 | LLM-judge |
 | --- | --- | --- | --- |
-| Vanilla + Oracle | william-dev | ✅ 9/9 完成 | **3.90** |
-| Vanilla + BM25 | william-dev | ✅ 9/9 完成 | **2.54** |
-| Vanilla + No-Context | william-dev | ✅ 9/9 完成 | **2.12** |
-| Hybrid-Oracle | cvm-rl | 🔄 1/9 完成（musique 50q done = 1.56），8 个 bench 在跑 | musique=1.56；ETA ~3 hrs |
+| Vanilla + Oracle | william-dev | ✅ 9/9 完成 | avg **3.90** |
+| Vanilla + BM25 | william-dev | ✅ 9/9 完成 | avg **2.54** |
+| Vanilla + No-Context | william-dev | ✅ 9/9 完成 | avg **2.12** |
+| Hybrid-Oracle | cvm-rl | 🔄 3/9 完成（musique 1.58, hotpotqa 3.48, nature_questions 1.28），msmarco_v1 在跑，余 5 个 bench 待 | 3-bench avg **2.11**；ETA ~2 hrs |
 
-本报告会在 hybrid-oracle 9 bench 全完成后做 v4 update。
+本报告会在 hybrid-oracle 9 bench 全完成后做 v4/v5 update。
 
 ---
 
@@ -247,6 +254,6 @@ paper MSA-4B-S2          →  trained MSA      →  judge 2.21
 
 ---
 
-**Last updated**: 2026-04-24（v3，hybrid musique 50q full = 1.56，部分推翻 LM-OK 假设）
-**Next update**: hybrid-oracle 8 个剩余 bench 完成后 v4
+**Last updated**: 2026-04-24（v3.5，hybrid 3/9 bench done，3-bench avg 2.11 ≈ vanilla+no-ctx 2.12）
+**Next update**: hybrid-oracle 6 个剩余 bench 完成后 v4
 **Author**: alignment audit + apple-to-apple eval triggered by user feedback
