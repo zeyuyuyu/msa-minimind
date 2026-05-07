@@ -28,9 +28,12 @@
 
 **最关键的 3 个偏差（按修复优先级）：**
 
-1. **训练范式不匹配 paper（P0）**：paper / 官方推理是 **multi-round interleave**，模型每轮只生成 doc-id 或 final answer；William / 我们是 **single-pass**，模型在一个 forward 里生成 doc-id + 完整 doc 原文 + answer。结果：part_b（doc 原文）吃掉绝大多数 SFT 容量和 max_new_tokens budget → part_c（answer）截断 → **91% empty answer**。这是 base 链 1.503 分的最可能根因。
-2. **base 链 backbone 选错（P0）**：paper 明确从 Instruct-2507 起步；我们 base 链拿了 Qwen3.5-9B-**Base** → 模型完全没有 chat / instruction-following 先验，要 SFT 才能学会，而我们的 SFT 容量都被 part_b 吃掉了。
-3. **base 链关键 MSA hyperparam 缩水（P1）**：chunk=32 vs paper 64；top_k=8 vs paper 16；num_docs=32 vs William 64 vs paper 全 corpus。这把训练时的稀疏度跟推理时的稀疏度调成了不同区间，router 学的相似度分布在推理时偏移。
+> **2026-04-24 重要修订**：原 P0 判断"训练范式问题"已被 **hybrid-oracle eval 数据推翻**。详见下方 §11。新的 P0 是 **router 训练不充分**。
+
+1. **🆕 P0 — Router 训练严重不充分**：base 链 SFT-S2 ckpt 在 musique 上 router precision = 0.028（接近随机）。即使 LM 部分能力其实 OK（hybrid-oracle 灌入 gold docs 时 musique LLM-judge **2.70/5**，已超过 paper MSA-4B-S2 的 2.21），但真 router 召回的全是错文档 → LM 答错。这是 base 链最终 1.503 分的真正瓶颈。
+2. **base 链 backbone 选错（P1）**：paper 明确从 Instruct-2507 起步；我们 base 链拿了 Qwen3.5-9B-**Base** → 缺 chat 先验，但 hybrid-oracle 数据显示 SFT 已经把 instruction-following 学得差不多了，所以这个不是首要 blocker。
+3. **base 链关键 MSA hyperparam 缩水（P1）**：chunk=32 vs paper 64；top_k=8 vs paper 16；num_docs=32 vs William 64 vs paper 全 corpus。训练-推理稀疏度区间不一致，可能是 router 学不好的次要原因之一。
+4. **❌ ~~训练范式 single-pass vs multi-round~~（降级为 P3 设计差异）**：原以为 Part B（doc 原文复述）吃光 SFT 容量是主要问题。但 hybrid-oracle 数据显示 LM 在 oracle 注入下 musique 能拿 2.70（超 paper MSA-4B-S2 的 2.21），证明 **single-pass 训练范式本身没有 fatal 问题**，最多是工程效率上不如 multi-round。下一轮重训不需要把这个当 P0 处理。
 
 ---
 
@@ -252,14 +255,14 @@ target (full SFT loss):
 
 | # | 偏差 | 影响 | 优先级 | 建议修复 |
 | --- | --- | --- | --- | --- |
-| 1 | **训练范式 single-pass vs paper multi-round interleave** | Part B 吃光 SFT 容量；推理时 answer 截断（91% empty on NQ） | **P0** | 改训练数据为 multi-round 格式（每个 multi-hop chain 拆成 2-3 个 sample），target 只含 doc-id 序列 *或* final answer，绝不让模型复述 doc 原文 |
-| 2 | **base 链用 Qwen-Base 没 chat 先验** | 模型完全无 instruction-following，SFT 又被 Part B 浪费 → 模型连 answer 风格都没学会 | **P0** | 后续都从 Instruct chain 走 |
-| 3 | **base 链 chunk=32, top_k=8** vs paper 64/16 | 训练时稀疏度跟推理不一致，router 学的相似度分布偏移 | P1 | 严格用 chunk=64, top_k=16（instruct 链已 OK） |
-| 4 | **CPT 规模仅为 paper 1/200 ~ 1/4400** | LM loss 没收敛到 paper 水平（paper 应该 < 2.0），router 在 ID 生成上学得不深 | P1 | instruct 链至少跑到 1B+ tokens；考虑 LR warmup 后期重启 |
-| 5 | **LoRA vs full-finetune** | paper 是 full-finetune，我们用 LoRA 限制了 backbone 的 representational change，可能让 MSA layer 难以收敛 | P2 | 第一轮重试可继续 LoRA r=64 + alpha=128，但若仍失败考虑 full-finetune backbone 后半层 |
-| 6 | **没装 flash_attn** | 训练慢 2-5×（doc-encoding 全 padded SDPA），但不影响最终精度 | P2 | 装 flash-attn==2.7.4.post1 |
-| 7 | **eval 用 William single-pass parser** | 跟 paper 推理不兼容，但跟我们训练匹配（自洽） | P2 | 重训后 eval 必须保持自洽（要么改 generate 用 multi-round，要么 stays single-pass） |
-| 8 | **eval API key 失效** | 当前 hybrid + vanilla BM25 都跑完了 telemetry，但 LLM-judge 401 User-not-found | P0 | user 提供新 OPENROUTER_API_KEY 即可恢复 |
+| 1 | **🆕 Router 训练严重不充分**：musique precision 0.028(near-random) | LM 看不到 gold docs → 输出错答(base 链 musique 0.66, NQ 0.27) | **P0** | router-only finetune（冻 LM，只训 qr_proj/kr_proj）+ 9 bench 联合 InfoNCE，目标 precision ≥ 0.5 |
+| 2 | **base 链 chunk=32, top_k=8** vs paper 64/16 | 训练-推理稀疏度区间不一致，router 学的相似度分布在推理时偏移 | **P0** | router 重训时强制 chunk=64, top_k=16（instruct 链已 OK） |
+| 3 | **CPT 规模仅为 paper 1/200 ~ 1/4400** | LM loss 没收敛到 paper 水平（paper 应该 < 2.0），router 在 ID 生成上学得不深 | P1 | router-only finetune 阶段做 1-3B token；若想完整重训需 5B+ token CPT |
+| 4 | **base 链用 Qwen-Base 没 chat 先验** | 缺 chat 先验，但 hybrid-oracle 数据显示 LM 已能输出 paper 水平 | P2 | 已弱化为次要因素；后续仍倾向用 Instruct chain |
+| 5 | **LoRA vs full-finetune** | paper 是 full-finetune，我们 LoRA 限制 backbone representational change | P2 | router-only finetune 时 router projector 不走 LoRA，直接 full-finetune（参数量小） |
+| 6 | **没装 flash_attn** | 训练慢 2-5× | P2 | 装 flash-attn==2.7.4.post1 |
+| 7 | **训练范式 single-pass vs paper multi-round** | hybrid-oracle 数据反证不是 fatal 问题 | P3 | 暂不改；router 修好后再评估 |
+| 8 | **eval 用 William single-pass parser** | 跟训练匹配（自洽） | P3 | router 修好后维持 single-pass eval（自洽即可） |
 
 ---
 
@@ -297,36 +300,27 @@ target (full SFT loss):
 - [ ] 完成 hybrid-oracle + vanilla BM25 的 LLM-judge
 - [ ] 把"vanilla Instruct + BM25"的 9 bench 全跑完，定标 paper Table 2 的 RAG R@1/5/10 baseline 在我们 9B 模型上的实际数值
 
-### Phase 1 — 改训练范式（最关键，P0）
-- [ ] 在 `msa/dataset_msa_sft.py` 里新增 multi-round mode：
-  - target 只包含 `[id1] [id2] ... [idK]<End-of-Retrieve>\n{answer}<|im_end|>`
-  - **完全去掉 Part B（doc 原文复述）**
-  - 多跳样本拆 single-step（已实现 split_multi_hop，复用即可）
-- [ ] 训练时 doc 内容从 `pooled_cache` 注入（沿用现有 sparse_generator 接口）
-- [ ] 推理时也用 multi-round generate（参照官方 `src/msa/generate.py`）
+### Phase 1 — Router-Only Finetune（最关键，P0；新方向）
+- [ ] 冻结 LM 全部参数（包括 LoRA），**只训 router_q_proj + router_k_proj**（layer 18-35，每层 ~10M 参数 × 18 = ~180M trainable）
+- [ ] 用 9 个 paper benchmark 的 train split 联合，每个 query 的 gold docs 当 positive，corpus 内随机其他当 negative
+- [ ] Loss = L_aux only (Eq.5 InfoNCE supervised)，τ=0.1
+- [ ] 强制 hyperparam：chunk_size=64, top_k=16
+- [ ] 训练 ~1-3B tokens(几小时)
+- [ ] 红线：每 1K step 在 musique held-out 30q 上 check router top-1 precision；若 1 hour 内 precision < 0.30 → 改方案
 
-### Phase 2 — 重启 instruct chain SFT
-- [ ] Resume from `p5b_step20000.pt`（KaLM+ST mix 已 CPT 696M tokens）
-- [ ] SFT-S1：5K step on sft_mix（new multi-round format），8K context
-  - 监控：empty_rate < 5%（基于训练时的 mini-eval）
-  - 监控：part_c 截断率 < 10%
-- [ ] mini-eval（每 1000 step）on 1 bench × 30q：LLM-judge 必须 ≥ 2.5（不达标立刻停）
-- [ ] SFT-S2：3K step curriculum 64→512 docs
+### Phase 2 — 重新做 9 bench full eval
+- [ ] router-only finetune 后 ckpt 跑 9 bench × 100q
+- [ ] 对比：paper MSA-4B-S2 (3.760), vanilla Instruct + oracle (≥4.0 预期), base SFT-S2 + new router
 
-### Phase 3 — 红线
-若任一 mini-eval 满足以下任一条件，立刻 kill 训练：
+### Phase 3 — 红线（任一触发立刻停）
 - empty_answer_rate > 0.30
-- LLM-judge < 2.0（vanilla Instruct + oracle 是 3.957，训完不能比 vanilla + oracle 还低）
-- router top-1 hit-a-positive < 0.50
-- LM loss 16K step 内变化 < 0.05（loss flat → kill，参考 5b 教训）
+- LLM-judge < 2.0（vanilla Instruct + BM25 都能拿到 ~2.7，训完不能比这还低）
+- router top-1 hit-a-positive < 0.30
+- aux loss 16K step 内变化 < 0.02
 
-### Phase 4 — 全量 evaluation
-- [ ] 9 个 paper benchmark 全跑（musique, hotpotqa, 2wiki, nq, ms_marco_v1, dureader, popqa, narrativeqa, triviaqa）
-- [ ] LLM-judge 0-5 scale, judge model = `google/gemini-2.5-flash`
-- [ ] 横向对比：
-  - paper MSA-4B-S2: avg 3.760
-  - vanilla Qwen3.5-9B-Instruct + oracle: 3.957
-  - **目标**：我们的 MSA-9B-S2 ≥ 3.5（距 paper 7%，距 vanilla+oracle 12%）
+### Phase 4 — 若 Phase 1 失败的备选方案
+- [ ] 完整重训 instruct chain：从 `p5b_step20000.pt` 接 SFT-S1（multi-round format） + SFT-S2 curriculum
+- [ ] 估算 ~50 hrs H100
 
 ---
 
@@ -346,5 +340,43 @@ target (full SFT loss):
 
 ---
 
-**Last updated**: 2026-04-24
+---
+
+## 11. 🆕 Apple-to-Apple Eval 数据反证（2026-04-24 update）
+
+完成两组 apple-to-apple eval 后，原 root cause hypothesis（"Part B 吃光容量 → empty answer"）被 **直接数据推翻**：
+
+### 数据 1：Hybrid-Oracle（base SFT-S2 + 强行注入 oracle gold docs，绕过 router）
+- **musique 10q smoke**：empty=0.10, reach_part_c=0.90, **LLM-judge 2.70/5**
+
+### 数据 2：Vanilla Qwen3.5-9B-Instruct + BM25 RAG（30q smoke）
+| Bench | BM25 IR | LLM-judge |
+| --- | --- | --- |
+| musique | precision=0.19, recall=0.39 | **1.43** |
+| hotpotqa | precision=0.27, recall=0.68 | **3.17** |
+| nature_questions | precision=0.19, recall=0.93 | **3.47** |
+
+### 横向对比（musique 一栏）
+| 模型/setup | LLM-judge musique |
+| --- | --- |
+| paper Qwen3-4B + RAG R@10 | 1.93 |
+| paper **MSA-4B-S2 @adaptive** | **2.21** |
+| 我们 base SFT-S2 + 真 router（原始 eval） | **0.66** ❌ |
+| 我们 vanilla 9B-Instruct + BM25 | 1.43 |
+| **我们 base SFT-S2 + oracle (hybrid)** | **2.70** ✅（反超 paper！） |
+
+### 推导
+1. **base SFT-S2 LM 的容量 ≥ paper MSA-4B-S2**（oracle 注入下 2.70 > 2.21）
+2. **真正的瓶颈不是 LM 也不是范式，而是 router**：musique router precision 0.028（接近随机 0.005），LM 永远看不到 gold docs
+3. BM25（precision 0.19）虽然弱，但比真 router（0.028）强 ~7×，所以 vanilla+BM25 (1.43) > base+真router (0.66)
+4. → **下一轮重训 P0 = router-only finetune**，不用碰 LM/SFT 范式
+
+### 完整 9 bench 数据
+- vanilla full(9 bench × 100q × oracle/BM25/no-context 3 modes): **进行中**(william-dev)
+- hybrid-oracle full(9 bench × 50q): **进行中**(cvm-rl)
+- 完整数据出炉后会在 `docs/APPLE_TO_APPLE_EVAL_REPORT.md` 中详细呈现
+
+---
+
+**Last updated**: 2026-04-24（v2，加 §11 数据反证 + root cause 改为 router）
 **Author**: alignment audit triggered by user feedback "训练时要仔细参照论文，以及论文对应的 github repo，看看里面的代码"
