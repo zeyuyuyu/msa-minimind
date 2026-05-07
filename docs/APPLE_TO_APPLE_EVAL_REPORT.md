@@ -65,20 +65,20 @@
 
 ### 3.2 Vanilla Qwen3.5-9B-Instruct + BM25 top-5 RAG（9 bench × 100q）
 
-每条 query 用 BM25 取 top-5 段落塞进 prompt。这是真实 RAG 上限（受 BM25 召回率限制）。
+每条 query 用 BM25 取 top-5 段落塞进 prompt。这是真实 RAG 基线（受 BM25 召回率限制）。
 
 | Bench | BM25 IR (P/R/F1) | LLM-judge 0-5 |
 | --- | --- | --- |
 | musique | 0.16/0.32/0.21 | 1.36 |
 | hotpotqa | 0.27/0.69/0.39 | 3.35 |
-| nature_questions | 0.18/0.88/0.29 | *进行中* |
-| msmarco_v1 | *待* | *进行中* |
-| 2wikimultihopqa | *待* | *进行中* |
-| hipporag_popqa | *待* | *进行中* |
-| hipporag_narrative | *待* | *进行中* |
-| dureader | *待* | *进行中* |
-| triviaqa_06M | *待* | *进行中* |
-| **AVERAGE** | — | *待* |
+| nature_questions | 0.18/0.88/0.29 | 3.51 |
+| msmarco_v1 | — | 3.04 |
+| 2wikimultihopqa | — | 2.37 |
+| hipporag_popqa | — | 2.42 |
+| hipporag_narrative | — | 1.82 |
+| dureader（中文） | 0.00/0.00/0.00（BM25 完全失效） | 0.73 |
+| triviaqa_06M | — | 4.28 |
+| **AVERAGE** | — | **2.54** |
 
 ### 3.3 Vanilla Qwen3.5-9B-Instruct + No-Context（9 bench × 100q）
 
@@ -86,7 +86,18 @@ prompt 里只问 question，不喂任何 docs。这是 LM 纯参数化知识下�
 
 | Bench | LLM-judge 0-5 |
 | --- | --- |
-| ALL | *进行中* |
+| musique | 1.02 |
+| hotpotqa | 2.13 |
+| nature_questions | 2.05 |
+| msmarco_v1 | 2.70 |
+| 2wikimultihopqa | 2.50 |
+| hipporag_popqa | 1.90 |
+| hipporag_narrative | 1.02 |
+| dureader | 1.99 |
+| triviaqa_06M | 3.74 |
+| **AVERAGE** | **2.12** |
+
+**有意思的发现**：dureader（中文）下 BM25 (0.73) **比 no-context (1.99) 还差** — 因为 BM25 在中文上召回完全失败（precision=0），LM 拿到错文档反而被误导。这印证了 **错的 retrieval 比 没 retrieval 还坏**，正好对应我们 base SFT-S2 router precision 0.028 的灾难。
 
 ### 3.4 Hybrid-Oracle: base SFT-S2 + oracle docs in pooled_cache（9 bench × 50q）
 
@@ -149,20 +160,28 @@ Bottleneck 链：
 
 ## 6. 跟 paper Table 2 的最终对比
 
-| Bench | paper RAG R@10 | paper MSA-4B-S2 | 我们 base SFT-S2 真 router | 我们 base SFT-S2 + oracle | 我们 vanilla 9B + oracle |
-| --- | --- | --- | --- | --- | --- |
-| musique | 1.93 | 2.21 | 0.66 | **2.70**（10q） | **3.58** |
-| hotpotqa | 3.79 | 4.06 | *待* | *进行中* | **4.54** |
-| nature_questions | 3.30 | 3.55 | *待* | *进行中* | **3.92** |
-| msmarco_v1 | 3.01 | 4.14 | *待* | *进行中* | **3.82** |
-| 2wikimultihopqa | 3.16 | 4.28 | *待* | *进行中* | **4.02** |
-| hipporag_popqa | 3.30 | 3.43 | *待* | *进行中* | **3.63** |
-| hipporag_narrative | 3.54 | 3.40 | *待* | *进行中* | **3.25** |
-| dureader | 3.61 | 4.16 | *待* | *进行中* | **3.91** |
-| triviaqa_10M / 06M | 4.39 | 4.62 | *待* | *进行中* | **4.43** |
-| **Avg** | 3.24 | **3.76** | 1.50 | *待* | **3.90** |
+| Bench | paper 4B + RAG R@1 | paper 4B + RAG R@10 | paper MSA-4B-S2 | 我们 vanilla 9B + no-ctx | 我们 vanilla 9B + BM25 | 我们 vanilla 9B + oracle | 我们 base SFT-S2 真 router | 我们 base SFT-S2 + oracle |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| musique | 0.94 | 1.93 | **2.21** | 1.02 | 1.36 | **3.58** | 0.66 ❌ | **2.70**（10q smoke） |
+| hotpotqa | 2.25 | 3.79 | 4.06 | 2.13 | 3.35 | **4.54** | *待* | *进行中* |
+| nature_questions | 3.45 | 3.30 | 3.55 | 2.05 | 3.51 | **3.92** | *待* | *进行中* |
+| msmarco_v1 | 2.89 | 3.01 | 4.14 | 2.70 | 3.04 | **3.82** | *待* | *进行中* |
+| 2wikimultihopqa | 1.07 | 3.16 | 4.28 | 2.50 | 2.37 | **4.02** | *待* | *进行中* |
+| hipporag_popqa | 2.96 | 3.30 | 3.43 | 1.90 | 2.42 | **3.63** | *待* | *进行中* |
+| hipporag_narrative | 1.61 | 3.54 | 3.40 | 1.02 | 1.82 | **3.25** | *待* | *进行中* |
+| dureader | 3.73 | 3.61 | 4.16 | 1.99 | 0.73 | **3.91** | *待* | *进行中* |
+| triviaqa_10M / 06M | 4.13 | 4.39 | 4.62 | 3.74 | 4.28 | **4.43** | *待* | *进行中* |
+| **AVERAGE** | **2.56** | **3.24** | **3.76** | **2.12** | **2.54** | **3.90** | **1.50** | *待* |
 
-> **3.90 > 3.76**：我们 vanilla 9B + oracle 已经超过 paper MSA-4B-S2 的 3.76。这是预期的（9B vs 4B + perfect retrieval），但说明 **paper 的 MSA 主要价值不是"打败 oracle"，而是"逼近 oracle 的同时把 retrieval 做到 100M 上下文"**。
+### 几个关键比较
+
+> **🔥 3.90 > 3.76**：我们 vanilla 9B + oracle 已经超过 paper MSA-4B-S2 的 3.76。这是预期的（9B vs 4B + perfect retrieval），但说明 **paper 的 MSA 主要价值不是"打败 oracle"，而是"逼近 oracle 的同时把 retrieval 做到 100M 上下文"**。
+
+> **🔥 我们 BM25 (2.54) ≈ paper 4B+RAG R@1 (2.56)**：说明我们的 vanilla baseline 跟 paper 的 same-backbone RAG 弱版完全可比，eval pipeline 是 sane 的。
+
+> **🔥 base SFT-S2 (1.50) < vanilla no-context (2.12) < vanilla BM25 (2.54)**：**我们 base 链 CPT+SFT 跑了 50+ hrs，结果比训练前的 vanilla Instruct 加最朴素的 BM25 还差 1.04 分**。换言之，"用 base + MSA + SFT-S2" 的组合不如 "用 Instruct + BM25" 的最 naive 组合。
+
+> **🔥 base SFT-S2 + oracle (2.70 musique) > base 真 router (0.66 musique)**：哪怕只看 musique 一栏，把 router 替换成 oracle 就能从 0.66 跳到 2.70（4×），证明所有性能损失基本都在 router 上。
 
 ---
 
@@ -189,14 +208,14 @@ Bottleneck 链：
 
 ## 8. Eval 状态（实时）
 
-| Eval | 机器 | 进度 | ETA | LLM-judge done |
-| --- | --- | --- | --- | --- |
-| Vanilla + Oracle | william-dev | ✅ 9/9 完成 | done | ✅ avg 3.90 |
-| Vanilla + BM25 | william-dev | ✅ 9/9 完成 | done | 部分（musique 1.36, hotpotqa 3.35） |
-| Vanilla + No-Context | william-dev | ✅ 9/9 完成 | done | judge 进行中 |
-| Hybrid-Oracle | cvm-rl | 1/9 进行中 | ~3-4 hrs | smoke musique 2.70（10q） |
+| Eval | 机器 | 进度 | LLM-judge avg |
+| --- | --- | --- | --- |
+| Vanilla + Oracle | william-dev | ✅ 9/9 完成 | **3.90** |
+| Vanilla + BM25 | william-dev | ✅ 9/9 完成 | **2.54** |
+| Vanilla + No-Context | william-dev | ✅ 9/9 完成 | **2.12** |
+| Hybrid-Oracle | cvm-rl | 1/9 进行中（musique 50q） | smoke 10q = 2.70；ETA ~3 hrs |
 
-本报告会在所有 eval 完成后做 v2 update。
+本报告会在 hybrid-oracle 9 bench 全完成后做 v3 update。
 
 ---
 
@@ -208,6 +227,6 @@ Bottleneck 链：
 
 ---
 
-**Last updated**: 2026-04-24（v1，vanilla oracle 完成）
-**Next update**: vanilla bm25/noctx judge 完成 + hybrid full 完成后
+**Last updated**: 2026-04-24（v2，vanilla 三种 mode 全完成）
+**Next update**: hybrid-oracle 9 bench × 50q 完成后 v3
 **Author**: alignment audit + apple-to-apple eval triggered by user feedback
