@@ -105,10 +105,13 @@ base SFT-S2 的 LM、prompt、parse 全部不变；唯一改动：把 router 选
 
 | Bench | empty_rate | reach_part_c | LLM-judge 0-5 |
 | --- | --- | --- | --- |
-| musique（10q smoke） | 0.10 | 0.90 | **2.70** |
-| musique（50q full） | *进行中* | | |
-| 其他 8 bench | *进行中* | | |
+| musique（10q smoke） | 0.10 | 0.90 | 2.70 ⚠️ 小样本偏高 |
+| **musique（50q full）** | **0.06** | **0.94** | **1.56** |
+| hotpotqa | *进行中* | | |
+| 其他 7 bench | *进行中* | | |
 | **AVERAGE** | — | — | *待* |
+
+> **⚠️ 重要 walkback**：musique full 50q(1.56)显著低于 smoke 10q(2.70)。Smoke 抽样偏向简单 query（3-4 doc）。**真实数据下，LM 在 oracle 完美检索下也只能拿 1.56**，比 paper MSA-4B-S2 的 2.21 还低 0.65。这意味着 root cause 不只是 router，**LM 自己也比 paper 弱**——可能由 LoRA r=16 太小、Base backbone 缺 chat 先验、CPT 1/4400 paper 数据量等因素累加。
 
 ---
 
@@ -143,18 +146,29 @@ base SFT-S2 的 LM、prompt、parse 全部不变；唯一改动：把 router 选
 
 ---
 
-## 5. Root Cause 推导
+## 5. Root Cause 推导（基于 musique 50q full 数据 v2）
 
 ```
-base SFT-S2 真 router    →  precision 0.028  →  LM 看错文档  →  judge 0.66 ❌
-base SFT-S2 oracle docs  →  precision 1.000  →  LM 看对文档  →  judge 2.70 ✅（超 paper）
-vanilla 9B + oracle docs →  precision 1.000  →  LM 看对文档  →  judge 3.58 ✅（无三段式 overhead）
+base SFT-S2 真 router    →  precision 0.028  →  judge 0.66
+base SFT-S2 + oracle     →  precision 1.000  →  judge 1.56  (full 50q)   ← LM 上限
+vanilla 9B + oracle      →  precision 1.000  →  judge 3.58              ← 真正的 LM 上限
+paper MSA-4B-S2          →  trained MSA      →  judge 2.21
 ```
 
-Bottleneck 链：
-1. **router precision = 0.028** → blocker（吞掉 80% 性能损失）
-2. MSA 三段式 prompt overhead → 次要损失（~30%）
-3. LM 本身 SFT 能力 → 已 OK，无需重训
+**性能 gap 分解**(我们 base 真 router 0.66 → paper 3.76,差 3.10):
+
+| 组件 | gap 贡献 | 解释 |
+| --- | --- | --- |
+| Router 弱(precision 0.028) | **0.90** | 真 router 0.66 → oracle 1.56 |
+| LM 自己比 paper 弱 | **0.65** | oracle 1.56 → paper MSA-4B-S2 2.21 |
+| 三段式 prompt overhead | ~0.7 | base+oracle 1.56 → vanilla+oracle 3.58 间还含 backbone 9B vs 4B 优势 |
+| Backbone 9B vs 4B 优势 | ~+1.4 | vanilla 9B+oracle 3.58 vs paper 4B+oracle 应该相近,差额来自 9B 更强 |
+
+**结论**:
+- **router 是最大单一 blocker**(占 ~30% 总 gap),先修;但...
+- **LM 也确实比 paper 弱** — 单修 router 把 musique 拉到 ~1.56,仍不达 paper 2.21
+- 想到 paper 水平,**需要重训 LM**(用 Instruct backbone + 更大 LoRA + 完整数据)
+- Base 链 SFT-S2 ckpt 不能"拿来直接用",最多做 router-only finetune 验证一下 router 修复带来的相对提升,作为 sanity check
 
 ---
 
@@ -162,7 +176,7 @@ Bottleneck 链：
 
 | Bench | paper 4B + RAG R@1 | paper 4B + RAG R@10 | paper MSA-4B-S2 | 我们 vanilla 9B + no-ctx | 我们 vanilla 9B + BM25 | 我们 vanilla 9B + oracle | 我们 base SFT-S2 真 router | 我们 base SFT-S2 + oracle |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| musique | 0.94 | 1.93 | **2.21** | 1.02 | 1.36 | **3.58** | 0.66 ❌ | **2.70**（10q smoke） |
+| musique | 0.94 | 1.93 | **2.21** | 1.02 | 1.36 | **3.58** | 0.66 ❌ | **1.56**（50q full） |
 | hotpotqa | 2.25 | 3.79 | 4.06 | 2.13 | 3.35 | **4.54** | *待* | *进行中* |
 | nature_questions | 3.45 | 3.30 | 3.55 | 2.05 | 3.51 | **3.92** | *待* | *进行中* |
 | msmarco_v1 | 2.89 | 3.01 | 4.14 | 2.70 | 3.04 | **3.82** | *待* | *进行中* |
@@ -185,24 +199,30 @@ Bottleneck 链：
 
 ---
 
-## 7. 下一步行动方案
+## 7. 下一步行动方案（基于 musique 50q full 反转后的修订）
 
-### Phase 1：Router-Only Finetune（基于本报告 root cause）
-- **目标**：把 base SFT-S2 ckpt 的 router precision 从 0.028 拉到 ≥ 0.50
-- **方法**：冻结 LM 全部参数，只训 18 层 router_q_proj + router_k_proj（~180M trainable）
-- **数据**：9 bench train split 联合，supervised InfoNCE Eq.(5)，τ=0.1
-- **预算**：~1-3B tokens，几小时 H100
-- **预期效果**：
-  - 若 router precision → 0.50：LM 看对一半文档 → 预期 LLM-judge **2.0-2.7**
-  - 若 router precision → 0.80：LM 看对绝大多数 → 预期 LLM-judge **接近 oracle 上限 2.7-3.0**
+### Phase 1：Router-Only Finetune（4-6 hrs，sanity check）
+- **目标**：验证修 router 能否让 base SFT-S2 musique 0.66 → 1.56（即接近 oracle 上限）
+- **方法**：冻 LM 全部参数，只训 18 层 router_q_proj + router_k_proj
+- **数据**：9 bench train split 联合 supervised InfoNCE，τ=0.1
+- **预期上限**：musique ~1.56(LM 上限就这水平，无法更高)
+- **意义**：作为 sanity check，但绝不可能达到 paper 2.21
+- **判断标准**：1 hr 内 router top-1 precision ≥ 0.30 → 继续；否则停
 
-### Phase 2：Eval 对比
-- 同 9 bench × 100q，跟本报告所有 baseline 横向对比
-- 期望条目：base SFT-S2 + new router
+### Phase 2：完整重训 Instruct Chain（必须做，~36 hrs）
+- 从 `p5b_step20000.pt` 接 SFT-S1 + SFT-S2
+- 关键修复：
+  - **backbone**：从 Base 切到 Instruct（已就绪：p5b 用的是 Instruct-2507 backbone）
+  - **LoRA r**：从 16 拉到 64 alpha=128（已就绪）
+  - **MSA hyperparam**：chunk=64, top_k=16（已就绪）
+  - **数据**：每 500 step mini-eval check router precision + LLM-judge，红线触发立刻停
+- 详细时长见 §8
 
-### Phase 3（可选）：若 Phase 1 不够好
-- 完整重训 instruct chain（resume p5b_step20000.pt + new SFT）
-- 估算 ~50 hrs H100
+### Phase 3：Final 9 bench eval + Round 2 决策
+- 同 9 bench × 100q
+- 目标：
+  - **Pass**：avg ≥ 2.5（超过 vanilla+BM25=2.54 的 baseline）
+  - **Excellent**：avg ≥ 3.5（接近 paper MSA-4B-S2=3.76）
 
 ---
 
@@ -213,9 +233,9 @@ Bottleneck 链：
 | Vanilla + Oracle | william-dev | ✅ 9/9 完成 | **3.90** |
 | Vanilla + BM25 | william-dev | ✅ 9/9 完成 | **2.54** |
 | Vanilla + No-Context | william-dev | ✅ 9/9 完成 | **2.12** |
-| Hybrid-Oracle | cvm-rl | 1/9 进行中（musique 50q） | smoke 10q = 2.70；ETA ~3 hrs |
+| Hybrid-Oracle | cvm-rl | 🔄 1/9 完成（musique 50q done = 1.56），8 个 bench 在跑 | musique=1.56；ETA ~3 hrs |
 
-本报告会在 hybrid-oracle 9 bench 全完成后做 v3 update。
+本报告会在 hybrid-oracle 9 bench 全完成后做 v4 update。
 
 ---
 
@@ -227,6 +247,6 @@ Bottleneck 链：
 
 ---
 
-**Last updated**: 2026-04-24（v2，vanilla 三种 mode 全完成）
-**Next update**: hybrid-oracle 9 bench × 50q 完成后 v3
+**Last updated**: 2026-04-24（v3，hybrid musique 50q full = 1.56，部分推翻 LM-OK 假设）
+**Next update**: hybrid-oracle 8 个剩余 bench 完成后 v4
 **Author**: alignment audit + apple-to-apple eval triggered by user feedback
