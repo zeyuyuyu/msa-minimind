@@ -88,7 +88,7 @@ base SFT-S2 在 musique 上 router precision = **0.028** ≈ 随机猜（因为 
 
 | 项 | Hybrid-Oracle | Vanilla 3 modes |
 | --- | --- | --- |
-| 机器 | cvm-rl(1× H100 80G) | william-dev(1× H100 80G) |
+| 机器 | cvm-rl(1× H200 80G) | william-dev(1× H200 80G) |
 | 模型 | base SFT-S2 ckpt（`qwen3_5_msa_sft_s2.pt`） | `Qwen3.5-9B-Instruct` 原始 weights |
 | Bench list（9 个，paper Table 2 对齐） | musique, hotpotqa, nature_questions, msmarco_v1, 2wikimultihopqa, hipporag_popqa, hipporag_narrative, dureader, triviaqa_06M | 同 |
 | 每 bench 样本数 | 50 | 100 |
@@ -312,8 +312,8 @@ paper MSA-4B-S2          →  trained MSA      →  judge 2.21
 
 ## 9. 资源消耗
 
-- william-dev H100：vanilla 3 modes × 9 bench × 100q ≈ 30 min compute time
-- cvm-rl H100：hybrid 9 bench × 50q ≈ 4 hrs compute time
+- william-dev H200：vanilla 3 modes × 9 bench × 100q ≈ 30 min compute time
+- cvm-rl H200：hybrid 9 bench × 50q ≈ 4 hrs compute time
 - OpenRouter Gemini-2.5-Flash：4 × 9 × ~100q ≈ 3600 judge calls × $0.0006 ≈ **$2 USD**
 
 ---

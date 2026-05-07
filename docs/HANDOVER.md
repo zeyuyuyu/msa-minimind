@@ -102,7 +102,7 @@ hipporag_popqa  hipporag_narrative  dureader  triviaqa_06M
 | Stage | Steps | Tokens | 状态 | Ckpt |
 | --- | --- | --- | --- | --- |
 | CPT-5a | 51k / 120k 计划 | 437M | 中止于 51k（约 94h） | `/workspace/runs/p5_shard1/p5_step50k.pt` |
-| CPT-5b | 30k / 60k 计划 | 259M | killed（flat loss > 16k step）+ 后期被 user 要求让出 H100 | `/workspace/runs/p5b_shard1/p5b_step20k.pt` |
+| CPT-5b | 30k / 60k 计划 | 259M | killed（flat loss > 16k step）+ 后期被 user 要求让出 H200 | `/workspace/runs/p5b_shard1/p5b_step20k.pt` |
 | Fork-S1 smoke | 1000 | 5M | smoke 100% empty answer，未 promote | `/workspace/runs/sft_s1_qwen3_5_*` |
 | Fork-S2 | 25 step | — | killed | — |
 
@@ -150,62 +150,198 @@ hipporag_popqa  hipporag_narrative  dureader  triviaqa_06M
 
 ## 5. 机器 & 路径
 
-### 5.1 cvm-rl（Phala dstack TEE，1× H100 80G）
+> 两台都是 **NVIDIA H200 80G HBM3e × 1**（不是 H100，原文档已修正）+ 4.9T 数据盘，driver 570.172.08，挂在 Phala dstack TEE 上，SSH 走 port 443 + openssl ProxyCommand。
+
+### 5.1 cvm-rl —— 我们 MSA 训练 / hybrid-oracle eval 主战场
+
+#### SSH 配置（贴到 William 自己 `~/.ssh/config`）
 
 ```
 Host cvm-rl
     HostName 670238bd987a441f48c007ec424afe8a688d3fe4-22.dstack-pha-in2.phala.network
     Port 443
     User root
-    IdentityFile ~/.ssh/<your_private_key>
+    IdentityFile ~/.ssh/<your_private_key>      # 对应 william.wu@0g.ai 公钥的私钥
     ProxyCommand openssl s_client -quiet -connect %h:%p 2>/dev/null
     StrictHostKeyChecking no
     UserKnownHostsFile /dev/null
 ```
 
-容器：`docker exec -it msa-dev bash`
+> William 的 `william.wu@0g.ai` 公钥已经 append 到 `cvm-rl:/root/.ssh/authorized_keys`（perm 600 已配，跟 zeyu 自己的 key 共存）。
 
-容器内主要目录：
-
-```
-/workspace/msa-minimind/             # 仓库（origin = william-0g/msa-minimind）
-/workspace/qwen35_base/              # Qwen3.5-9B-Base weights (HF)
-/workspace/qwen35_instruct/          # Qwen3.5-9B-Instruct weights
-/workspace/encoded_corpora/          # 9 bench 预编码的 EncodedCorpus（每个 bench 一份 K/V/KR）
-/workspace/runs/                     # 所有训练产出 ckpt + log
-    sft_s2_qwen3_5_0426_0349/        # 当前 base 链 final ckpt（这个最重要）
-    p5_shard1/                       # instruct CPT-5a (43GB)
-    p5b_shard1/                      # instruct CPT-5b (13GB)
-/workspace/eval_hybrid_full/         # 当前正在跑的 hybrid-oracle eval
-/workspace/eval_evermind_aligned_v2/ # 之前 base SFT-S2 的真实 router eval（1.503 那次）
-/workspace/eval_vanilla_base/        # vanilla Qwen3.5-9B-Base eval
-```
-
-### 5.2 william-dev（1× H100 80G）
+#### 容器
 
 ```bash
-ssh william-dev   # 这个 host 的 SSH 配置 William 自己有
-docker exec -it compassionate_austin bash
+docker exec -it msa-dev bash       # 唯一一个 dev 容器
 ```
 
-容器内：
+#### 容器环境（cvm-rl `msa-dev`）
+
+| 项 | 值 |
+| --- | --- |
+| Python | 3.11.11（`/opt/conda/bin/python`） |
+| torch | 2.6.0+cu124 |
+| transformers | 5.3.0 |
+| flash_attn | 2.7.4.post1 |
+| 已安装 | `accelerate`、`peft`、`trl`（看 `pip list`） |
+| **未安装** | wandb / sglang / vllm（如要监控 loss 用本地 tensorboard 或自己加 wandb） |
+| HF cache | `/root/.cache/huggingface/`（23G） |
+| 磁盘 | 4.9T 总，已用 1.5T (29%) |
+
+> **没有 tmux/screen session**！我们之前的 hybrid eval 是用 `docker exec ... &` 跑的（log 写到 `/workspace/eval_hybrid_full/run.log`）。如果训练，建议自己 `tmux new -s sft_s2` 再跑，避免 ssh 断了 job 死。
+
+#### 容器内 `/workspace` 目录全图（按重要性）
+
 ```
-/workspace/eval_vanilla_instruct/full/{oracle,bm25,noctx}/   # vanilla 9B-Instruct 三 mode 完整结果
-/workspace/eval_vanilla_instruct/bm25_smoke/                  # 早期 smoke
+/workspace/
+  ├─ msa-minimind/                  ← 仓库（origin = william-0g/msa-minimind），注意 uid=1000 不是 root
+  │   ├─ msa/                       ← model + training + inference 全部 python module
+  │   └─ scripts/                   ← bench_msa_oracle_hybrid.py / bench_evermind_aligned_v2.py / 等
+  ├─ evermind_msa/                  ← 🔑 paper 官方 repo (https://github.com/...)，已 clone，inference 部分代码
+  ├─ evermind_venv/                 ← paper 官方 repo 的独立 venv（如果想跑 paper inference 用这个）
+  │
+  ├─ qwen35_base/                   ← Qwen3.5-9B-Base HF weights
+  ├─ qwen35_instruct/               ← Qwen3.5-9B-Instruct HF weights
+  │
+  ├─ runs/                          ← 所有训练 ckpt + log
+  │   ├─ sft_s2_qwen3_5_0426_0349/qwen3_5_msa_sft_s2.pt    ← base 链 final（358MB LoRA only）⭐ 当前 eval 用这个
+  │   ├─ sft_s1_qwen3_5_0425_1439/qwen3_5_msa_sft_s1.pt    ← base 链 SFT-S1 中间产物
+  │   ├─ p5_shard1/                                         ← instruct CPT-5a（43GB total，含多个 step 快照）
+  │   ├─ p5b_shard1/                                         ← instruct CPT-5b（13GB）
+  │   └─ sft_s3_*/、sft_s2_smoke_*/、auto_*.log              ← 一些早期 smoke / 失败重跑（可忽略）
+  │
+  ├─ encoded_corpora/               ← 🔑 380G！所有 bench 的预编码 K/V/KR cache
+  │   │   （chunk=32, top_k=8。如果改 chunk/k 必须全部重 encode）
+  │   ├─ musique_99999/             ← 9 个评测 bench 各一份 (_99999 = 全 corpus，不限 size)
+  │   ├─ hotpotqa_99999/、nature_questions_99999/、msmarco_v1_99999/
+  │   ├─ 2wikimultihopqa_full/、hipporag_popqa_full/、hipporag_narrative_full/
+  │   ├─ dureader_full/、triviaqa_06M_99999/
+  │   ├─ ms_100M_50k/、ms_100M_full/、ms_50M_int4/...   ← MS MARCO 多份（CPT 训练数据）
+  │   └─ pg_32K/, pg_64K/, pg_128K/, pg_256K/, pg_512K/, pg_1000K/
+  │                                  ← 🔑 RULER/NIAH haystack（paper Fig 4 用的，长度 32K-1M）
+  │
+  ├─ msa_bench/                     ← 9 bench raw json 数据（query + gold doc 标注）
+  ├─ cpt_shards_paper/shard_1/      ← paper-aligned CPT shard（KaLM + ST mix），3.1G
+  ├─ shard_1_paper.tar              ← 同上压缩包，5.4G
+  ├─ shard.tgz                      ← 旧 base 链 CPT shard，3.6G
+  ├─ haystacks/                     ← NIAH 原始文本
+  │
+  ├─ eval_hybrid_full/              ← ⭐ 当前 in-flight eval（hybrid-oracle 9 bench × 50q）
+  ├─ eval_evermind_aligned_v2/      ← base SFT-S2 真实 router eval（1.503 那次）
+  ├─ eval_vanilla_base/             ← vanilla Qwen3.5-9B-Base eval
+  │
+  ├─ launch_p5_cpt.sh / launch_p5b_cpt.sh / launch_sft_s1.sh   ← instruct 链各阶段 launcher（不在 git！）
+  ├─ run_bench_on_ckpt.sh / run_llm_judge.sh / auto_eval_*.sh   ← 自动化脚本
+  └─ minimind/、msa-qwen/                                        ← 旧版本，可忽略
 ```
 
-### 5.3 我本地工作区（仅用于编辑 docs / 推 git）
+#### 一些进程层面的状态
+
+- 当前长期跑的进程只有 hybrid-oracle eval（在 `eval_hybrid_full/run.log` 后台），没有训练 job。
+- 有不少 `[python] <defunct>` 僵尸进程（早期 OOM / kill 留下，不影响 GPU）。
+
+---
+
+### 5.2 william-dev —— vanilla baseline / fork-SFT 实验机
+
+#### SSH
+
+```bash
+ssh william-dev    # William 自己的 SSH 配置（HostName ≈ dc85116b... .dstack-pha-in2.phala.network:443）
+docker exec -it compassionate_austin bash    # 容器名是这个，不是 msa-dev
+```
+
+#### 容器环境（william-dev `compassionate_austin`）
+
+| 项 | 值 |
+| --- | --- |
+| Python | 3.12.3（系统 `/usr/bin/python`，**不是 conda**） |
+| torch | 2.9.1（比 cvm-rl 新一档）|
+| transformers | 5.3.0 |
+| flash_attn | 4.0.0b5（`flash-attn-4`）|
+| 已装 | `sglang 0.5.10rc0`、`peft 0.18.1`、`accelerate 1.6.0`、`wandb 0.26.0`、`trl 0.24.0`、`flashinfer-python 0.6.6` |
+| HF cache | `/root/.cache/huggingface/`（**177G**，下过很多模型，有 sglang 拉的全套）|
+| 磁盘 | 4.9T 总，已用 2.3T (46%) |
+
+> **环境差异警告**：cvm-rl 用 conda + torch 2.6，william-dev 用系统 py3.12 + torch 2.9。**MSA 训练 / eval 我们一直在 cvm-rl 跑，因为 transformers 5.3 + torch 2.6 是验证过 work 的组合**。william-dev 主要用来跑 vanilla baseline + fork-SFT 实验。如果在 william-dev 跑训练前最好先小 smoke 测试。
+
+#### william-dev tmux 状态（重要！）
+
+```
+0  detached   ← William 自己的 swe-bench / sglang 工作
+1  detached   ← William sglang_covenant
+2  ATTACHED   ← William 当前在用
+8  detached
+12 detached
+13 detached
+```
+
+> **6 个 tmux 都是 William 自己的工作**（sglang server、swe-bench eval、Covenant-72B 等），**不是我们的 MSA 训练**。我们 fork-SFT 实验是用 `docker exec ... nohup &` 跑的，已经全部 kill 干净。**William 接手时不要误删自己的 tmux**。
+
+#### 容器内 `/workspace` 目录
+
+```
+/workspace/
+  ├─ msa-minimind/                              ← 跟 cvm-rl 同步过的代码
+  ├─ qwen35_instruct/                           ← Qwen3.5-9B-Instruct（vanilla 用）
+  ├─ encoded_corpora/                           ← 部分 bench（够跑 vanilla eval 即可）
+  ├─ msa_bench/                                 ← 同 cvm-rl
+  │
+  ├─ runs/                                      ← fork-SFT 试验产物（smoke 失败，可删）
+  │   ├─ sft_s1_qwen3_5_*/                      ← Fork-S1 1k step
+  │   └─ sft_s2_*/                              ← Fork-S2 25 step（killed）
+  │
+  ├─ eval_vanilla_instruct/                     ← ⭐ vanilla baseline 全部结果在这
+  │   ├─ full/oracle/llmscore_summary.json     ← AVG 3.90
+  │   ├─ full/bm25/llmscore_summary.json       ← AVG 2.54
+  │   ├─ full/noctx/llmscore_summary.json      ← AVG 2.12
+  │   └─ bm25_smoke/                            ← 早期 30q smoke
+  │
+  ├─ launch_fork_s1.sh / launch_fork_s2.sh     ← 已结束的 fork SFT launcher
+  ├─ auto_eval_daemon.sh / manual_eval.sh      ← 自动化 eval 脚本
+  └─ swe / swe_qwen2_unres / outputs/          ← William 自己的 swe-bench 工作（不要动）
+```
+
+---
+
+### 5.3 我本地工作区（zeyu，仅用于编辑 docs / 推 git）
 
 ```
 /home/zeyu/msa-qwen/msa-minimind/    # git working tree
-  ├─ docs/                            # 4 个 markdown 文档都在这里
-  └─ scripts/                         # 跟 cvm-rl 容器内 scripts 同步
+  ├─ docs/                            # 5 个 markdown 文档都在这里
+  │   ├─ HANDOVER.md                  ← 你正在看的
+  │   ├─ PAPER_ALIGNMENT_AUDIT.md
+  │   ├─ APPLE_TO_APPLE_EVAL_REPORT.md
+  │   ├─ BASE_TRAINING_REPORT.md
+  │   └─ INSTRUCT_TRAINING_REPORT.md
+  ├─ msa/、scripts/                   # 跟 cvm-rl 容器内 msa-minimind/ 同步
+  └─ ...
 ```
 
-git remote：
-- `origin` = `william-0g/msa-minimind` （上游）
-- `myfork` = `zeyuyuyu/msa-minimind` （我 push 到这里，再开 PR）
-- 已开的 PR：`docs: training reports` 系列在 `docs/training-reports` branch
+#### Git remote
+
+```
+origin   = https://github.com/william-0g/msa-minimind.git    # 上游
+myfork   = https://github.com/zeyuyuyu/msa-minimind.git      # 我 push 到这里
+当前 branch = docs/training-reports                          # 所有 docs 改动都在这
+```
+
+> 已开 PR：`docs: training reports` 系列。William 接手后可以选择 merge 到自己的 main 或者直接 cherry-pick 关心的 commit。
+
+---
+
+### 5.4 速查：跨机器 / 跨容器路径对照
+
+| 内容 | cvm-rl `msa-dev` | william-dev `compassionate_austin` | 我本地 |
+| --- | --- | --- | --- |
+| 仓库代码 | `/workspace/msa-minimind/` | `/workspace/msa-minimind/` | `/home/zeyu/msa-qwen/msa-minimind/` |
+| Qwen3.5-9B-Base | `/workspace/qwen35_base/` | ❌ 没下 | ❌ |
+| Qwen3.5-9B-Instruct | `/workspace/qwen35_instruct/` | `/workspace/qwen35_instruct/` | ❌ |
+| 训练 ckpt | `/workspace/runs/` | `/workspace/runs/`（仅 fork-SFT smoke） | ❌ |
+| EncodedCorpus | `/workspace/encoded_corpora/`（380G,全） | `/workspace/encoded_corpora/`（部分） | ❌ |
+| Bench raw data | `/workspace/msa_bench/` | `/workspace/msa_bench/` | ❌ |
+| paper 官方 code | `/workspace/evermind_msa/` | ❌ | `/tmp/evermind_msa/` |
+| eval 输出 | `/workspace/eval_*/` | `/workspace/eval_vanilla_instruct/` | ❌ |
 
 ---
 

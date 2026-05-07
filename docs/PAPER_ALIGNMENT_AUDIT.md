@@ -320,7 +320,7 @@ target (full SFT loss):
 
 ### Phase 4 — 若 Phase 1 失败的备选方案
 - [ ] 完整重训 instruct chain：从 `p5b_step20000.pt` 接 SFT-S1（multi-round format） + SFT-S2 curriculum
-- [ ] 估算 ~50 hrs H100
+- [ ] 估算 ~50 hrs H200
 
 ---
 
