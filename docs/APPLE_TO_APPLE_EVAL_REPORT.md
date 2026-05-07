@@ -166,11 +166,16 @@ base SFT-S2 的 LM、prompt、parse 全部不变；唯一改动：把 router 选
 | **musique（50q full）** | **0.06** | **0.94** | **1.54** | -2.04 |
 | **hotpotqa（50q full）** | **0.04** | **0.98** | **3.46** | -1.08 |
 | **nature_questions（50q full）** | — | — | **1.22** | **-2.70** ⚠️ |
-| **msmarco_v1（50q full）** | — | — | **2.84** | -0.98 |
+| **msmarco_v1（50q full）** | — | — | **2.96** | -0.86 |
 | **2wikimultihopqa（50q full）** | — | — | **2.20** | -1.82 |
-| hipporag_popqa | *进行中* | | | |
-| 其他 3 bench | *待* | | | |
-| **5-bench AVERAGE so far** | — | — | **2.25** | — |
+| **hipporag_popqa（50q full, 新）** | — | — | **4.44** | **+0.81** ✅ |
+| hipporag_narrative | *进行中* | | | |
+| 其他 2 bench (dureader, triviaqa_06M) | *待* | | | |
+| **6-bench AVERAGE so far** | — | — | **2.71** | — |
+
+> **🟢 重要 walkback #3**：hipporag_popqa 拿到 **4.44**，**反超 vanilla+oracle 的 3.63**！这是单点稀有亮点，原因可能是 PopQA 类是"实体短答"且 oracle 文档很短（适合三段式 prompt 的 part_b 复述），训完的 LM 在这种小 corpus 短答场景反而更稳。
+>
+> 这把 6-bench AVG 拉到 **2.71**，已超过 vanilla+no-ctx (2.12)。但不要过度乐观：还差 vanilla+oracle (3.90) 1.19 分；剩 3 bench 里 hipporag_narrative 是长文叙事（vanilla oracle 才 3.25,我们大概率更低）、dureader 中文（vanilla 3.91，我们多半更低）。最终 9-bench AVG 预计落在 **2.4-2.6**。
 
 > **⚠️ 重要 walkback #1**：musique full 50q(1.54)显著低于 smoke 10q(2.70)。Smoke 抽样偏向简单 query（3-4 doc）。**真实数据下，LM 在 oracle 完美检索下也只能拿 1.54**，比 paper MSA-4B-S2 的 2.21 还低 0.67。
 
