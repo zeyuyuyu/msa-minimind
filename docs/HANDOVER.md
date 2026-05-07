@@ -14,7 +14,7 @@
    - **base 链**：`Qwen3.5-9B-Base` → CPT → SFT-S1 → SFT-S2，全部完成。最终 LLM-judge **1.503/5**（远低于 paper MSA-4B-S2 的 2.21）。
    - **instruct 链**：`Qwen3.5-9B-Instruct` → CPT-5a (51k step) → CPT-5b (30k step, killed flat loss) → Fork-S1 (1k step smoke, 100% empty answer)。已暂停。
 2. **根因已定位（见 §6）**：router 训练严重不充分（precision ≈ 0.03 ≈ random）+ LM 自身也偏弱。
-3. **当前一直跑的 1 个 job**：cvm-rl 上 hybrid-oracle 9-bench 50q evaluation，6/9 已完成，AVG=2.71，剩 3 bench ETA 1.5h。
+3. **hybrid-oracle 9-bench 50q eval 已全部完成**（2026-05-07 07:17 UTC）：9-bench AVG = **2.4222**，超过 vanilla no-ctx 2.12（+0.30）但远低于 vanilla oracle 3.90（-1.48）。当前 cvm-rl 上没有正在跑的 job。
 4. **下一步推荐方案（见 §7）**：先做 router-only finetune（48h, sanity check）→ 不行就完整重训 instruct chain（约 7-10 天）。
 5. **重要文档（必读，按重要性排序）**：
 
@@ -64,25 +64,26 @@ hipporag_popqa  hipporag_narrative  dureader  triviaqa_06M
 
 ### 2.3 base 链 SFT-S2 + hybrid-oracle（绕过 router，强行喂 gold docs）
 
-正在 cvm-rl 上跑，目前 6/9 完成：
+cvm-rl 9 bench × 50q 已全部完成（`/workspace/eval_hybrid_full/llmscore_summary.json`，2026-05-07 07:17 UTC）：
 
 | Bench | LLM-judge | vs vanilla+oracle |
 | --- | --- | --- |
 | musique 50q | 1.54 | -2.04 |
-| hotpotqa 50q | 3.46 | -1.08 |
-| nature_questions 50q | 1.22 | **-2.70** ⚠ |
-| msmarco_v1 50q | 2.96 | -0.86 |
+| hotpotqa 50q | 3.48 | -1.06 |
+| nature_questions 50q | 1.24 | **-2.68** ⚠ |
+| msmarco_v1 50q | 2.88 | -0.94 |
 | 2wikimultihopqa 50q | 2.20 | -1.82 |
-| **hipporag_popqa 50q** | **4.44** | **+0.81** ✅ 唯一反超点 |
-| hipporag_narrative | 进行中 | |
-| dureader, triviaqa_06M | 待 | |
-| **6-bench AVG** | **2.71** | -1.19 |
+| **hipporag_popqa 50q** | **4.46** | **+0.83** ✅ 唯一反超点 |
+| **hipporag_narrative 50q** | **0.54** | **-2.71** ⚠⚠ 最差 |
+| dureader 50q | 2.64 | -1.27 |
+| triviaqa_06M 50q | 2.82 | -1.61 |
+| **9-bench AVG** | **2.4222** | -1.48 |
 
 详见 [APPLE_TO_APPLE_EVAL_REPORT.md §3.4](./APPLE_TO_APPLE_EVAL_REPORT.md)。
 
 ### 2.4 一句话结论
 
-> **base 链训完产生绝对退化**（SFT-S2 真实 1.503 < vanilla no-ctx 2.12）。即使把 router 完全修好（hybrid-oracle 6-bench AVG 2.71）也只能勉强超过 vanilla no-ctx，距离 vanilla oracle (3.90) 还差 1.19 分。**LM 本身也被训弱了**。
+> **base 链训完产生绝对退化**（SFT-S2 真实 1.503 < vanilla no-ctx 2.12）。即使把 router 完全修好（hybrid-oracle 9-bench AVG 2.4222）也只能勉强超过 vanilla no-ctx（+0.30），距离 vanilla oracle (3.90) 还差 1.48 分。**LM 本身也被训弱了**，narrative / NQ / 2wiki 三个 bench 在 oracle 下都掉超过 1.8 分。
 
 ---
 
@@ -354,11 +355,11 @@ myfork   = https://github.com/zeyuyuyu/msa-minimind.git      # 我 push 到这�
 
 base SFT-S2 ckpt 在 musique 上 router precision = **0.028**（gold ratio 0.04 → 接近 random）。SFT-S2 课程从 64→512 docs 增加得太快、loss 信号被 part_b 吃掉，router 没学到检索。
 
-**证据**：hybrid-oracle 把 router 跳过、直接喂 gold docs，6-bench AVG 从 1.503 → 2.71（+1.21）。
+**证据**：hybrid-oracle 把 router 跳过、直接喂 gold docs，9-bench AVG 从 1.503 → 2.4222（+0.92）。
 
 ### P1 — LM 自身也偏弱
 
-hybrid-oracle 6-bench AVG = 2.71 < vanilla oracle 3.90，差 1.19 分。即使检索完美，LM 本身的回答能力也明显输给训练前的 9B-Instruct。
+hybrid-oracle 9-bench AVG = 2.4222 < vanilla oracle 3.90，差 1.48 分。即使检索完美，LM 本身的回答能力也明显输给训练前的 9B-Instruct。后跑的 hipporag_narrative (0.54) 把均值显著拉下（-2.71 vs vanilla oracle），说明长文叙事 QA 是 SFT 退化最严重的场景。
 
 **怀疑成因**（按重要性）：
 1. **LoRA rank 太小**（r=16 vs paper r=64）→ adaptation capacity 不够。
@@ -380,7 +381,7 @@ William 实现是 single-pass（part_a/b/c 一次出），paper / 官方 inferen
 
 ### Phase A（优先）— Router-only Finetune（48h, sanity check）
 
-**假设**：LM 已经能用（hybrid-oracle 6-bench AVG 2.71 已超 vanilla no-ctx 2.12），只要把 router 修到 paper 水平，可能就能拿到 ~2.5-3.0。
+**假设**：LM 已经能用（hybrid-oracle 9-bench AVG 2.4222 已超 vanilla no-ctx 2.12），只要把 router 修到 paper 水平，理论天花板就是这个 2.42。但因为真 router precision = 0.028 ≈ random，Phase A 即使把 router 修到完美也只能拿到 ~2.4，绝对达不到 paper MSA-9B 等效估计的 ~3.0。
 
 **做法**：
 1. 冻结 base SFT-S2 ckpt 的 LM LoRA 参数。
@@ -514,9 +515,9 @@ base 链就是因为没有第 4 项导致一直跑到 SFT-S2 训完才发现退�
 
 | Task | 位置 | 状态 | ETA |
 | --- | --- | --- | --- |
-| hybrid-oracle 9 bench × 50q | cvm-rl `/workspace/eval_hybrid_full/` | 6/9 done (AVG 2.71) | ~1.5h 剩 3 bench |
-| 写 v4 报告（hybrid 9/9 全完整数据 + Phase A 推导） | 本文档姐妹文件 `APPLE_TO_APPLE_EVAL_REPORT.md` | 待 | hybrid 完成后立刻更新 |
-| Phase A: router-only finetune | 未启动 | pending | ~48h（如果决定走） |
+| hybrid-oracle 9 bench × 50q | cvm-rl `/workspace/eval_hybrid_full/` | ✅ 完成 2026-05-07 07:17 UTC（AVG 2.4222） | — |
+| ~~写 v4 报告（hybrid 9/9 全完整数据 + Phase A 推导）~~ | `APPLE_TO_APPLE_EVAL_REPORT.md` | ✅ 已更新到 v4（2026-05-07） | — |
+| Phase A: router-only finetune | 未启动 | pending | ~48h（如果决定走，天花板 ~2.4） |
 | Phase B: 完整 instruct chain 重训 | 未启动 | pending | ~7-10 天 |
 
 ---
@@ -524,9 +525,9 @@ base 链就是因为没有第 4 项导致一直跑到 SFT-S2 训完才发现退�
 ## 12. 待 William 决策
 
 1. **走 Phase A 还是直接 Phase B？**
-   - Phase A 便宜但赌 LM 已经够用 → hybrid 6/9 数据显示 LM 不太够用，Phase A 大概率只能拿到 2.5-2.8。
+   - Phase A 便宜但赌 LM 已经够用 → hybrid 9/9 完整数据显示 LM 在完美检索下也只 2.42，**Phase A 天花板就是 2.42**（绝对值），不可能更高。
    - Phase B 慢但结果可预期（LoRA r=64 + Instruct backbone + 充足 CPT 已被证明过 paper 走通）。
-   - **我个人建议**：直接 Phase B。Phase A 投入 2 天但天花板 2.8 远低于 paper 2.21（4B）的 9B 等效估计 ~3.0。
+   - **我个人建议**：直接 Phase B。Phase A 投入 2 天天花板 2.4，远低于 paper 2.21（4B）的 9B 等效估计 ~3.0；而且 narrative (0.54) / NQ (1.24) 这种 oracle 下都崩的 bench，再修 router 也救不回来。
 2. **要不要做 Phase C（fork paper ckpt + 在我们 eval 上跑）？** 这能彻底分清是 implementation bug 还是 training 没到位，~1 天即可完成。**强烈建议跑这一轮**作为决策依据。
 3. **是否接受 single-pass 训练范式？** 如果决心追平 paper，应该把 multi-round interleave 也实现一份，对比两者哪个上限高。
 4. **要不要切到 instruct-2507 backbone？** paper 用的是 2507 的 base，比 9B-Instruct 老一些但官方就是这个。

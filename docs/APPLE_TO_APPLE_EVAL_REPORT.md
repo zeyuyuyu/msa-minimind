@@ -2,10 +2,10 @@
 
 > **目的**：在 base 链 SFT-S2 训完产生 LLM-judge 1.503/5 的失败结果后，user 反复强调"训练前后 / 我们模型 vs paper 必须做 apple-to-apple 公平对比"。本报告设计并执行了 3 组对照实验，定位 base 链 1.503 分的真正瓶颈。
 >
-> **核心结论（提前剧透 / v3.5 更新）**：
-> 1. router 训练严重不充分（precision ~0.03 ≈ 随机），是首要瓶颈；
-> 2. 但 hybrid-oracle 5/9 bench 数据显示 LM 自身平均也只有 2.25/5（5-bench），跟 vanilla 9B + 不喂任何 docs (2.12) 相当 → **LM 也被训弱了**；
-> 3. 因此 router-only finetune 只是 **第一步 sanity check**（48h），**长期必须完整重训 instruct chain**。
+> **核心结论（v4 / 2026-05-07，hybrid 9/9 全完成）**：
+> 1. router 训练严重不充分（precision ~0.03 ≈ 随机），是首要瓶颈：真 router AVG 1.503 → hybrid oracle AVG **2.4222**（+0.92）；
+> 2. 但 hybrid-oracle 完整 9-bench 数据显示 LM 自身天花板就是 **2.4222**，离 vanilla 9B + oracle (3.90) 还差 **1.48 分**，narrative / NQ / 2wiki 三个 bench 在 oracle 下都掉超过 1.8 分 → **LM 也被训弱了，Phase A 投入再多也只能拿到 2.4**；
+> 3. 因此 router-only finetune 只是 **第一步 sanity check**（天花板 ~2.4），**长期必须完整重训 instruct chain**才能上 3.0。
 
 ---
 
@@ -164,24 +164,27 @@ base SFT-S2 的 LM、prompt、parse 全部不变；唯一改动：把 router 选
 | --- | --- | --- | --- | --- |
 | musique（10q smoke） | 0.10 | 0.90 | 2.70 ⚠️ 小样本偏高 | — |
 | **musique（50q full）** | **0.06** | **0.94** | **1.54** | -2.04 |
-| **hotpotqa（50q full）** | **0.04** | **0.98** | **3.46** | -1.08 |
-| **nature_questions（50q full）** | — | — | **1.22** | **-2.70** ⚠️ |
-| **msmarco_v1（50q full）** | — | — | **2.96** | -0.86 |
+| **hotpotqa（50q full）** | **0.04** | **0.98** | **3.48** | -1.06 |
+| **nature_questions（50q full）** | — | — | **1.24** | **-2.68** ⚠️ |
+| **msmarco_v1（50q full）** | — | — | **2.88** | -0.94 |
 | **2wikimultihopqa（50q full）** | — | — | **2.20** | -1.82 |
-| **hipporag_popqa（50q full, 新）** | — | — | **4.44** | **+0.81** ✅ |
-| hipporag_narrative | *进行中* | | | |
-| 其他 2 bench (dureader, triviaqa_06M) | *待* | | | |
-| **6-bench AVERAGE so far** | — | — | **2.71** | — |
+| **hipporag_popqa（50q full）** | — | — | **4.46** | **+0.83** ✅ |
+| **hipporag_narrative（50q full）** | — | — | **0.54** | **-2.71** ⚠️⚠️ |
+| **dureader（50q full）** | — | — | **2.64** | -1.27 |
+| **triviaqa_06M（50q full）** | — | — | **2.82** | -1.61 |
+| **9-bench AVERAGE** | — | — | **2.4222** | **-1.48** |
 
-> **🟢 重要 walkback #3**：hipporag_popqa 拿到 **4.44**，**反超 vanilla+oracle 的 3.63**！这是单点稀有亮点，原因可能是 PopQA 类是"实体短答"且 oracle 文档很短（适合三段式 prompt 的 part_b 复述），训完的 LM 在这种小 corpus 短答场景反而更稳。
+> **🟢 walkback #3**：hipporag_popqa 拿到 **4.46**，**反超 vanilla+oracle 的 3.63**！这是单点稀有亮点，原因可能是 PopQA 类是"实体短答"且 oracle 文档很短（适合三段式 prompt 的 part_b 复述），训完的 LM 在这种小 corpus 短答场景反而更稳。
 >
-> 这把 6-bench AVG 拉到 **2.71**，已超过 vanilla+no-ctx (2.12)。但不要过度乐观：还差 vanilla+oracle (3.90) 1.19 分；剩 3 bench 里 hipporag_narrative 是长文叙事（vanilla oracle 才 3.25,我们大概率更低）、dureader 中文（vanilla 3.91，我们多半更低）。最终 9-bench AVG 预计落在 **2.4-2.6**。
+> **🔴 walkback #4（v4 新增）**：hipporag_narrative 完整 50q **只有 0.54**，比 vanilla no-ctx 的 1.02 还低一半，比 vanilla oracle 的 3.25 差 -2.71（**全 9-bench 最大跌幅**）。SFT-S2 训完的 LM 在长文叙事 QA 上**几乎完全丧失能力**。怀疑成因：narrative 的 oracle 文档极长（>4K token），三段式 prompt 在 max_new_tokens 1024 budget 下被 part_b 复述吃掉，根本到不了 part_c。
+>
+> 这把 9-bench AVG 落在 **2.4222**（v3.5 预测的 2.4-2.6 区间下沿），已超过 vanilla+no-ctx 2.12（+0.30），但仍差 vanilla+oracle 3.90 整整 1.48 分。**这就是 base 链 LM 在完美检索假设下的绝对天花板**。
 
 > **⚠️ 重要 walkback #1**：musique full 50q(1.54)显著低于 smoke 10q(2.70)。Smoke 抽样偏向简单 query（3-4 doc）。**真实数据下，LM 在 oracle 完美检索下也只能拿 1.54**，比 paper MSA-4B-S2 的 2.21 还低 0.67。
 
-> **⚠️ 重要 walkback #2**：nature_questions oracle = **1.22**，比 vanilla 9B + 不带任何 docs (2.05) 还低。这暴露了一个新问题：**MSA 三段式 prompt 在 short-answer 任务上有副作用**。NQ 是 1-2 词的短答 QA，但我们的模型被训练成输出 1300+ char 的 part_b doc 复述 + part_c answer，short-answer 抽取被 part_b 输出干扰了。这是 SFT 数据 mix 问题（sft_mix 偏向 multi-hop 长答 QA，没专门处理 NQ-style short answer）。
+> **⚠️ 重要 walkback #2**：nature_questions oracle = **1.24**，比 vanilla 9B + 不带任何 docs (2.05) 还低。这暴露了一个新问题：**MSA 三段式 prompt 在 short-answer 任务上有副作用**。NQ 是 1-2 词的短答 QA，但我们的模型被训练成输出 1300+ char 的 part_b doc 复述 + part_c answer，short-answer 抽取被 part_b 输出干扰了。这是 SFT 数据 mix 问题（sft_mix 偏向 multi-hop 长答 QA，没专门处理 NQ-style short answer）。
 
-> **当前 5-bench avg = 2.25 ≈ vanilla 9B + no-context (2.12)**：base 链的 LM 在 oracle 完美检索下，平均水平基本等于训练前的 9B-Instruct 不带任何 docs。**训练在大多数任务上让模型相对训练前出现退化**。仅 hotpotqa（multi-hop, 长答）训练有正向收益（3.46 vs vanilla no-ctx 1.50）；其它任务 oracle 上限都≤vanilla no-ctx。
+> **完整 9-bench avg = 2.4222 vs vanilla 9B + no-context 2.12（+0.30）vs vanilla 9B + oracle 3.90（-1.48）**：base 链的 LM 在 oracle 完美检索下，平均仅比训练前的 9B-Instruct 不带任何 docs 强 0.3 分，离训练前 + 完美 RAG 还差 1.48 分。**训练在 5/9 个 bench 上正向（vs vanilla no-ctx）**：musique +0.52、hotpotqa +1.35、msmarco_v1 +0.18、hipporag_popqa +2.56、dureader +0.65；**4/9 个 bench 退化**：NQ -0.81、2wiki -0.30、narrative -0.48、triviaqa -0.92。换言之，**即使把 base 链 LM + oracle 跟训练前 + 0 docs 相比，也只是赢了一半**。
 
 ---
 
@@ -195,14 +198,16 @@ base SFT-S2 的 LM、prompt、parse 全部不变；唯一改动：把 router 选
 | paper **Qwen3-4B-Instruct-2507 + RAG R@10** | Qwen3-4B-Embedding | 1.93 |
 | paper **MSA-4B-S2 @adaptive**（complete training） | MSA router | **2.21** |
 | 我们 **base SFT-S2 + 真 router**（原始 eval） | trained router (precision **0.028**) | **0.66** ❌ |
-| 我们 **vanilla 9B-Instruct + no_ctx**（待） | none | *待* |
+| 我们 **vanilla 9B-Instruct + no_ctx** | none | 1.02 |
 | 我们 **vanilla 9B-Instruct + BM25** | BM25 (precision 0.16) | 1.36 |
 | 我们 **vanilla 9B-Instruct + oracle** | gold docs（perfect） | **3.58** |
-| 我们 **base SFT-S2 + oracle** (hybrid，10q smoke) | gold docs（perfect） | **2.70** |
+| 我们 **base SFT-S2 + oracle** (hybrid，10q smoke) | gold docs（perfect） | 2.70（小样本偏高） |
+| 我们 **base SFT-S2 + oracle** (hybrid，**50q full**) | gold docs（perfect） | **1.54** |
 
-**洞察 #1：base SFT-S2 LM 不输 paper MSA-4B-S2**
-- hybrid (2.70) > paper MSA-4B-S2 (2.21)
-- 我们的 LM SFT 阶段学得 OK，问题不在 LM
+**洞察 #1（v4 修正）：base SFT-S2 LM 在 musique 上不如 paper MSA-4B-S2**
+- hybrid 50q full (1.54) **< paper MSA-4B-S2 (2.21)**，差 0.67 分
+- 之前 10q smoke 的 2.70 是抽样偏差（偏简单 query），完整 50q 暴露 LM 弱
+- 我们的 LM SFT 阶段在 musique 上**没学好**，单修 router 不够
 
 **洞察 #2：BM25 都比我们的 router 强**
 - BM25 musique precision 0.16 → judge 1.36
@@ -210,8 +215,8 @@ base SFT-S2 的 LM、prompt、parse 全部不变；唯一改动：把 router 选
 - BM25 弱了 7×，但还能拉 2× 分
 
 **洞察 #3：vanilla + oracle 是 LM 真正的天花板**
-- 9B + oracle = 3.58 → 比 hybrid (2.70) 高 0.88
-- 这 0.88 的差距来自 MSA 三段式 prompt 的 token budget（part B 复述 doc 占 ~1300 chars）
+- 9B + oracle = 3.58 → 比 hybrid 50q full (1.54) 高 **2.04 分**
+- 这 2.04 的差距 = MSA 三段式 prompt overhead + base 链 LM 退化（musique full 50q 实际 LM 已被 SFT 训弱）
 - 但已经远高于真 router 下的 0.66
 
 ---
@@ -246,17 +251,16 @@ paper MSA-4B-S2          →  trained MSA      →  judge 2.21
 
 | Bench | paper 4B + RAG R@1 | paper 4B + RAG R@10 | paper MSA-4B-S2 | 我们 vanilla 9B + no-ctx | 我们 vanilla 9B + BM25 | 我们 vanilla 9B + oracle | 我们 base SFT-S2 真 router | 我们 base SFT-S2 + oracle |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| musique | 0.94 | 1.93 | **2.21** | 1.02 | 1.36 | **3.58** | 0.66 ❌ | **1.58** |
+| musique | 0.94 | 1.93 | **2.21** | 1.02 | 1.36 | **3.58** | 0.66 ❌ | **1.54** |
 | hotpotqa | 2.25 | 3.79 | 4.06 | 2.13 | 3.35 | **4.54** | *待* | **3.48** |
-| nature_questions | 3.45 | 3.30 | 3.55 | 2.05 | 3.51 | **3.92** | *待* | **1.28** ⚠️ |
-| msmarco_v1 | 2.89 | 3.01 | 4.14 | 2.70 | 3.04 | **3.82** | *待* | *进行中* |
-| 2wikimultihopqa | 1.07 | 3.16 | 4.28 | 2.50 | 2.37 | **4.02** | *待* | *待* |
-| hipporag_popqa | 2.96 | 3.30 | 3.43 | 1.90 | 2.42 | **3.63** | *待* | *待* |
-| hipporag_narrative | 1.61 | 3.54 | 3.40 | 1.02 | 1.82 | **3.25** | *待* | *待* |
-| dureader | 3.73 | 3.61 | 4.16 | 1.99 | 0.73 | **3.91** | *待* | *待* |
-| triviaqa_10M / 06M | 4.13 | 4.39 | 4.62 | 3.74 | 4.28 | **4.43** | *待* | *待* |
-| **3-bench partial avg** | 2.21 | 3.01 | 3.27 | 1.73 | 2.74 | 4.01 | — | **2.11** |
-| **9-bench AVERAGE** | **2.56** | **3.24** | **3.76** | **2.12** | **2.54** | **3.90** | **1.50** | *待* |
+| nature_questions | 3.45 | 3.30 | 3.55 | 2.05 | 3.51 | **3.92** | *待* | **1.24** ⚠️ |
+| msmarco_v1 | 2.89 | 3.01 | 4.14 | 2.70 | 3.04 | **3.82** | *待* | **2.88** |
+| 2wikimultihopqa | 1.07 | 3.16 | 4.28 | 2.50 | 2.37 | **4.02** | *待* | **2.20** |
+| hipporag_popqa | 2.96 | 3.30 | 3.43 | 1.90 | 2.42 | **3.63** | *待* | **4.46** ✅ |
+| hipporag_narrative | 1.61 | 3.54 | 3.40 | 1.02 | 1.82 | **3.25** | *待* | **0.54** ⚠️⚠️ |
+| dureader | 3.73 | 3.61 | 4.16 | 1.99 | 0.73 | **3.91** | *待* | **2.64** |
+| triviaqa_10M / 06M | 4.13 | 4.39 | 4.62 | 3.74 | 4.28 | **4.43** | *待* | **2.82** |
+| **9-bench AVERAGE** | **2.56** | **3.24** | **3.76** | **2.12** | **2.54** | **3.90** | **1.50** | **2.4222** |
 
 ### 几个关键比较
 
@@ -304,9 +308,9 @@ paper MSA-4B-S2          →  trained MSA      →  judge 2.21
 | Vanilla + Oracle | william-dev | ✅ 9/9 完成 | avg **3.90** |
 | Vanilla + BM25 | william-dev | ✅ 9/9 完成 | avg **2.54** |
 | Vanilla + No-Context | william-dev | ✅ 9/9 完成 | avg **2.12** |
-| Hybrid-Oracle | cvm-rl | 🔄 3/9 完成（musique 1.58, hotpotqa 3.48, nature_questions 1.28），msmarco_v1 在跑，余 5 个 bench 待 | 3-bench avg **2.11**；ETA ~2 hrs |
+| Hybrid-Oracle | cvm-rl | ✅ 9/9 完成（2026-05-07 07:17 UTC） | avg **2.4222** |
 
-本报告会在 hybrid-oracle 9 bench 全完成后做 v4/v5 update。
+v4 update 已合入本报告（2026-05-07）。下次 update 触发条件：Phase A router-only finetune 完成、或 Phase C paper 4B ckpt 在我们 eval 上跑完。
 
 ---
 
@@ -318,6 +322,6 @@ paper MSA-4B-S2          →  trained MSA      →  judge 2.21
 
 ---
 
-**Last updated**: 2026-04-24（v3.5，hybrid 3/9 bench done，3-bench avg 2.11 ≈ vanilla+no-ctx 2.12）
-**Next update**: hybrid-oracle 6 个剩余 bench 完成后 v4
+**Last updated**: 2026-05-07（v4，hybrid 9/9 bench done，9-bench AVG **2.4222** = vanilla+no-ctx 2.12 + 0.30，距 vanilla+oracle 3.90 -1.48）
+**Next update**: Phase A router-only finetune 完成、或 Phase C paper 4B ckpt 在我们 eval 上跑完
 **Author**: alignment audit + apple-to-apple eval triggered by user feedback
