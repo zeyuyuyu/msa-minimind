@@ -20,6 +20,7 @@
 
    | 文档 | 用途 |
    | --- | --- |
+   | [`docs/LESSONS_LEARNED.md`](./LESSONS_LEARNED.md) | ⭐ **最重要**：7 类失败原因 + 防止再犯 checklist + 红线规则 |
    | [`docs/PAPER_ALIGNMENT_AUDIT.md`](./PAPER_ALIGNMENT_AUDIT.md) | paper / 官方 repo / 我们 implementation 三方对比 + 重训 blueprint |
    | [`docs/APPLE_TO_APPLE_EVAL_REPORT.md`](./APPLE_TO_APPLE_EVAL_REPORT.md) | 4 组对照实验结果 + 根因数据支撑 |
    | [`docs/BASE_TRAINING_REPORT.md`](./BASE_TRAINING_REPORT.md) | base 链全流程（含失败原因 5 条） |
@@ -547,6 +548,7 @@ base 链就是因为没有第 4 项导致一直跑到 SFT-S2 训完才发现退�
 ```
 本仓库 docs/
   ├─ HANDOVER.md                        ← 本文档（先读）
+  ├─ LESSONS_LEARNED.md                 ← ⭐ 失败复盘 + 防止再犯 checklist
   ├─ PAPER_ALIGNMENT_AUDIT.md          ← paper vs ours 对比 + 重训 blueprint
   ├─ APPLE_TO_APPLE_EVAL_REPORT.md     ← 4 组 controlled experiments + 根因数据
   ├─ BASE_TRAINING_REPORT.md            ← base 链全流程
@@ -565,7 +567,8 @@ eval 输出（按重要性）:
 
 ---
 
-> **如果只看一个文档**：[`PAPER_ALIGNMENT_AUDIT.md`](./PAPER_ALIGNMENT_AUDIT.md)（含 §12 重训 blueprint）。
+> **如果只看一个文档（启动重训前必读）**：[`LESSONS_LEARNED.md`](./LESSONS_LEARNED.md)（含 §8 启动 checklist + 红线规则）。
+> **如果想看重训 blueprint**：[`PAPER_ALIGNMENT_AUDIT.md` §12](./PAPER_ALIGNMENT_AUDIT.md)。
 > **如果只看一组数据**：[`APPLE_TO_APPLE_EVAL_REPORT.md` §3](./APPLE_TO_APPLE_EVAL_REPORT.md)（4 组对照表）。
 > **如果想直接复现 hybrid-oracle eval**：本文档 §8.3。
 > **任何问题**：transcript 在 `agent-transcripts/f57e37db-fbb1-452c-849e-179d1b5aca1d`，含 100+ 轮迭代记录。
