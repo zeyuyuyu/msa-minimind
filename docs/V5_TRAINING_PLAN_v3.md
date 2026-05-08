@@ -211,8 +211,13 @@ Changes:
 - Mirror the 9B trainer's hookup at line 187–192
 
 ### 5.3 Verify target format alignment with paper
-Before launch: read `dataset_msa_shard.py` to confirm what it generates as the
-LM target. Paper inference output (reverse-engineered) is:
+**Verified 2026-05-08**: Local fork's `prompt_template.py:build_msa_train_target` emits the
+**simplified format**, NOT paper format:
+```
+[d1] [d2] ... The answer to the question is: <answer><|im_end|>
+```
+
+Paper format (reverse-engineered from inference output) is:
 ```
 the document number related to the above issue is:
 [id1]<|object_ref_end|>[id1]. <doc1 full text>
@@ -222,8 +227,18 @@ the document number related to the above issue is:
 <|object_ref_end|>The answer to the question is: {answer}<|im_end|>
 ```
 
-If `dataset_msa_shard.py` emits this exact format → ✅ launch.
-If it emits a simplified format (e.g., `[id1] [id2] ... The answer is: ans`) → 🚧 patch the format generator before launch.
+`dataset_msa.py` has `include_doc_text_in_target` forced to `False` (deprecated by William
+in v4 with comment "paper format has no Part B"; **this is incorrect** — paper §4.3 ablation
+explicitly says removing Original Text Injection costs -37%).
+
+**Decision for v5**: stay with William's simplified format to **isolate the data-source
+variable** (v4 vs v5 same code, only data differs). If v5 still underperforms, v6 will
+restore paper format with Original Text Injection.
+
+Trade-off:
+- ✅ Cleaner attribution: any v4→v5 delta is purely from data-source change
+- ✅ No tokenizer risk from special markers (`<|object_ref_end|>`, `<End-of-Retrieve>`)
+- ✗ Diverges from paper §4.3, may cap maximum reachable performance
 
 ### 5.4 Smoke test
 - 100-step run on a tiny copy of shard_1 (1000 samples)
