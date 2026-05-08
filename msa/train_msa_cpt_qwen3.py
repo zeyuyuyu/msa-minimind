@@ -161,6 +161,7 @@ def build_dataset(args, tokenizer):
         )
     if args.data == "shard":
         from msa.dataset_msa_shard import load_shard
+        keep = [s.strip() for s in (args.shard_source_filter or "").split(",") if s.strip()] or None
         return load_shard(
             args.shard_dir, tokenizer,
             num_docs=args.num_docs,
@@ -169,6 +170,7 @@ def build_dataset(args, tokenizer):
             seed=args.seed,
             include_doc_text_in_target=True,
             sample_limit=args.num_facts if args.num_facts else 0,
+            keep_sources=keep,
         )
     raise ValueError(args.data)
 
@@ -227,7 +229,10 @@ def run_phase(
             for gi, pg in enumerate(optimizer.param_groups):
                 pg["lr"] = cosine_lr(step, total_steps, group_base_lrs[gi])
 
-            optimizer.zero_grad(set_to_none=True)
+            ga = max(1, int(getattr(args, "grad_accum_steps", 1) or 1))
+            micro_step = run_state["global_step"] % ga
+            if micro_step == 0:
+                optimizer.zero_grad(set_to_none=True)
             with autocast_ctx:
                 out = model(
                     doc_input_ids=batch["doc_input_ids"],
@@ -239,22 +244,24 @@ def run_phase(
                     lm_loss_coef=lm_coef,
                     aux_loss_coef=aux_coef,
                 )
-            loss = out.loss
+            loss = out.loss / ga
 
             if scaler is not None:
                 scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    (p for p in model.parameters() if p.requires_grad), args.grad_clip
-                )
-                scaler.step(optimizer)
-                scaler.update()
+                if micro_step == ga - 1:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        (p for p in model.parameters() if p.requires_grad), args.grad_clip
+                    )
+                    scaler.step(optimizer)
+                    scaler.update()
             else:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    (p for p in model.parameters() if p.requires_grad), args.grad_clip
-                )
-                optimizer.step()
+                if micro_step == ga - 1:
+                    torch.nn.utils.clip_grad_norm_(
+                        (p for p in model.parameters() if p.requires_grad), args.grad_clip
+                    )
+                    optimizer.step()
 
             running["loss"] += float(out.loss.detach())
             running["lm"] += float(out.lm_loss.detach()) if out.lm_loss is not None else 0.0
@@ -381,6 +388,10 @@ def main():
     # Data
     ap.add_argument("--data", choices=["synthetic", "t2t_mini", "ms_marco", "sft_mix", "shard"], default="ms_marco")
     ap.add_argument("--shard_dir", type=str, default="", help="Path to shard_X dir (for --data shard)")
+    ap.add_argument("--shard_source_filter", type=str, default="",
+                    help="Comma-separated list of `ds` values to keep (for --data shard). Empty=keep all.")
+    ap.add_argument("--grad_accum_steps", type=int, default=1,
+                    help="Gradient accumulation: optimizer.step() runs every N micro-batches. Effective batch = batch_size * grad_accum_steps.")
     ap.add_argument("--sft_datasets", type=str, default="hotpotqa,musique,triviaqa,nq,msmarco",
                     help="comma-list of bench names for sft_mix; default = William's 5-bench")
     ap.add_argument("--resume_ckpt", type=str, default="",

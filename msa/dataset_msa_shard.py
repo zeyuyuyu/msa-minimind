@@ -33,6 +33,7 @@ def load_shard(
     seed: int = 42,
     include_doc_text_in_target: bool = True,
     sample_limit: int = 0,
+    keep_sources: list[str] | None = None,
 ) -> MSACPTDataset:
     p = Path(shard_dir)
     if not p.is_dir():
@@ -46,11 +47,16 @@ def load_shard(
         texts = [ln.rstrip("\n") for ln in fh]
     print(f"[load_shard]   corpus size: {len(texts):,}", flush=True)
 
+    keep_set = set(keep_sources) if keep_sources else None
+    if keep_set:
+        print(f"[load_shard] keep_sources filter: {sorted(keep_set)}", flush=True)
+
     print(f"[load_shard] reading {samples_path}", flush=True)
     samples = []
+    skipped = 0
     with open(samples_path, encoding="utf-8") as fh:
         for i, line in enumerate(fh):
-            if sample_limit and i >= sample_limit:
+            if sample_limit and len(samples) >= sample_limit:
                 break
             try:
                 obj = json.loads(line)
@@ -58,14 +64,18 @@ def load_shard(
                 continue
             query = obj.get("query")
             pos_idx = obj.get("pos_idx") or []
+            ds = obj.get("ds", "")
             if not query or not pos_idx:
+                continue
+            if keep_set is not None and ds not in keep_set:
+                skipped += 1
                 continue
             samples.append({
                 "query": query,
                 "positive_ids": list(pos_idx),
                 "answer": "",
             })
-    print(f"[load_shard]   samples: {len(samples):,}", flush=True)
+    print(f"[load_shard]   samples kept: {len(samples):,} (skipped {skipped:,} by source filter)", flush=True)
 
     corpus = Corpus(texts)
     return MSACPTDataset(
